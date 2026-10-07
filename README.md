@@ -42,3 +42,9 @@ This project sources are licensed under an unmodified zlib/libpng license, which
 $(Additional Licenses)
 
 *Copyright (c) $(Year) $(User Name) ($(User Twitter/GitHub Name))*
+
+## Build
+
+    cmake -B build
+    cmake --build build -j$(nproc)
+    ./build/bugtracker/bugtracker
