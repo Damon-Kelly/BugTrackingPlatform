@@ -1,10 +1,10 @@
-## $(Bug Tracking Platform)
+## Bug Tracking Platform
 
 
 
 ### Description
 
-$
+
 
 ### Features
 
@@ -27,13 +27,6 @@ _TODO: Show your game to the world, animated GIFs recommended!._
 
  - $(Developer 01) - $(Role/Tasks Developed)
  - $(Developer 02) - $(Role/Tasks Developed)
- - $(Developer 03) - $(Role/Tasks Developed)
-
-### Links
-
- - YouTube Gameplay: $(YouTube Link)
- - itch.io Release: $(itch.io Game Page)
- - Steam Release: $(Steam Game Page)
 
 ### License
 
