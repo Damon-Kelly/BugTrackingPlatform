@@ -51,6 +51,9 @@ static FieldId activeField = FIELD_NONE;
 
 #define SCROLL_SPEED 40.0f   // pixels moved per mouse-wheel notch
 
+#define SCROLLBAR_W        6      // width of the scrollbar track
+#define SCROLLBAR_MIN_THUMB 30.0f // thumb never gets smaller than this
+
 // ---------- Helpers ----------
 static void AddBug(const char *title, const char *desc, const char *steps, Status s, Priority p)
 {
@@ -204,6 +207,21 @@ int main(void)
             EndScissorMode();
 
             if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { selected = i; activeField = FIELD_NONE; }
+        }
+
+        // ----- Scrollbar (only when the list overflows) -----
+        if (maxScroll > 0) {
+            Rectangle track = { LIST_W - SCROLLBAR_W - 1, listView.y + 4, SCROLLBAR_W, listView.height - 8 };
+
+            // Thumb height = fraction of content that is visible, scaled to the track
+            float thumbH = track.height * (listView.height / contentH);
+            if (thumbH < SCROLLBAR_MIN_THUMB) thumbH = SCROLLBAR_MIN_THUMB;
+
+            // Thumb position = how far through the scroll range we are, scaled to the free track space
+            float thumbY = track.y + (track.height - thumbH) * (listScroll / maxScroll);
+
+            DrawRectangleRounded(track, 1.0f, 4, (Color){ 24, 26, 31, 255 });
+            DrawRectangleRounded((Rectangle){ track.x, thumbY, track.width, thumbH }, 1.0f, 4, (Color){ 110, 118, 140, 255 });
         }
 
         // ----- Right panel: bug details -----
