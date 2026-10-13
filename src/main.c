@@ -49,6 +49,8 @@ static FieldId activeField = FIELD_NONE;
 #define ROW_GAP     6                    // space between rows
 #define ROW_PITCH   (ROW_H + ROW_GAP)    // distance from one row's top to the next (58)
 
+#define SCROLL_SPEED 40.0f   // pixels moved per mouse-wheel notch
+
 // ---------- Helpers ----------
 static void AddBug(const char *title, const char *desc, const char *steps, Status s, Priority p)
 {
@@ -138,6 +140,7 @@ int main(void)
     AddBug("Typo on settings page", "'Prefrences' should be 'Preferences'.",
            "1. Open Settings", STATUS_RESOLVED, PRIO_MEDIUM);
     selected = 0;
+    float listScroll = 0.0f;   // how many pixels the list is scrolled down
 
     while (!WindowShouldClose())
     {
@@ -150,6 +153,16 @@ int main(void)
         // How many rows the list is showing. Today that's every bug;
         // search will later set this to the number of matches instead.
         int rowCount = bugCount;
+
+        float contentH  = rowCount * ROW_PITCH;            // total height of all rows
+        float maxScroll = contentH - listView.height;      // how far we can scroll
+        if (maxScroll < 0) maxScroll = 0;                  // everything fits: no scrolling
+
+        if (CheckCollisionPointRec(GetMousePosition(), listView))
+            listScroll -= GetMouseWheelMove() * SCROLL_SPEED;
+
+        if (listScroll < 0) listScroll = 0;
+        if (listScroll > maxScroll) listScroll = maxScroll;
 
         BeginDrawing();
         ClearBackground(COL_BG);
@@ -164,19 +177,30 @@ int main(void)
         }
 
         for (int slot = 0; slot < rowCount; slot++) {
-        int i = slot;   // bug index. Search will later map slot -> matching bug index here
-        Rectangle row = { LIST_MARGIN, LIST_TOP + slot * ROW_PITCH, LIST_W - 2 * LIST_MARGIN, ROW_H };
-        bool hover = CheckCollisionPointRec(GetMousePosition(), row)
-                && CheckCollisionPointRec(GetMousePosition(), listView);
+            int i = slot;   // bug index. Search will later map slot -> matching bug index here
+            Rectangle row = { LIST_MARGIN, LIST_TOP + slot * ROW_PITCH - listScroll, LIST_W - 2 * LIST_MARGIN, ROW_H };
+
+            // Skip rows that are entirely outside the visible list area
+            if (row.y + row.height < listView.y || row.y > listView.y + listView.height) continue;
+
+            bool hover = CheckCollisionPointRec(GetMousePosition(), row)
+                    && CheckCollisionPointRec(GetMousePosition(), listView);
+
+            // Row background and status dot, clipped to the list area
+            BeginScissorMode((int)listView.x, (int)listView.y, (int)listView.width, (int)listView.height);
             DrawRectangleRounded(row, 0.15f, 6, (i == selected) ? COL_ROW_SEL : (hover ? ColorBrightness(COL_ROW, 0.1f) : COL_ROW));
             DrawCircle((int)row.x + 16, (int)row.y + 26, 7, statusColors[bugs[i].status]);
+            EndScissorMode();
 
+            // Text, clipped to the row's text area AND the list area
+            Rectangle textArea = { row.x + 30, row.y, row.width - 38, row.height };
+            Rectangle textClip = GetCollisionRec(textArea, listView);
+            BeginScissorMode((int)textClip.x, (int)textClip.y, (int)textClip.width, (int)textClip.height);
             const char *t = bugs[i].title[0] ? bugs[i].title : "(untitled)";
-            BeginScissorMode((int)row.x + 30, (int)row.y, (int)row.width - 38, (int)row.height);
             DrawText(t, (int)row.x + 32, (int)row.y + 8, 18,
-                     bugs[i].status == STATUS_RESOLVED ? COL_DIM : COL_TEXT);
+                    bugs[i].status == STATUS_RESOLVED ? COL_DIM : COL_TEXT);
             DrawText(TextFormat("#%d  %s", bugs[i].id, prioNames[bugs[i].priority]),
-                     (int)row.x + 32, (int)row.y + 30, 14, prioColors[bugs[i].priority]);
+                    (int)row.x + 32, (int)row.y + 30, 14, prioColors[bugs[i].priority]);
             EndScissorMode();
 
             if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { selected = i; activeField = FIELD_NONE; }
