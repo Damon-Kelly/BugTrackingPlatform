@@ -41,6 +41,14 @@ static FieldId activeField = FIELD_NONE;
 #define COL_DIM     (Color){ 140, 146, 160, 255 }
 #define LINE_H      22
 
+// List panel layout
+#define LIST_W      340                  // width of the left panel
+#define LIST_TOP    64                   // y where the first row starts (below the header)
+#define LIST_MARGIN 8                    // gap between panel edge and rows
+#define ROW_H       52                   // height of one row
+#define ROW_GAP     6                    // space between rows
+#define ROW_PITCH   (ROW_H + ROW_GAP)    // distance from one row's top to the next (58)
+
 // ---------- Helpers ----------
 static void AddBug(const char *title, const char *desc, const char *steps, Status s, Priority p)
 {
@@ -131,28 +139,35 @@ int main(void)
            "1. Open Settings", STATUS_RESOLVED, PRIO_MEDIUM);
     selected = 0;
 
-    const int listW = 340;
-
     while (!WindowShouldClose())
     {
         // Clicking empty space clears focus; fields re-set it if clicked (see TextField).
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) activeField = FIELD_NONE;
 
+        // The visible window onto the list. Rows outside this rectangle are scrolled out of view.
+        Rectangle listView = { 0, LIST_TOP, LIST_W, GetScreenHeight() - LIST_TOP };
+
+        // How many rows the list is showing. Today that's every bug;
+        // search will later set this to the number of matches instead.
+        int rowCount = bugCount;
+
         BeginDrawing();
         ClearBackground(COL_BG);
 
         // ----- Left panel: bug list -----
-        DrawRectangle(0, 0, listW, GetScreenHeight(), COL_PANEL);
+        DrawRectangle(0, 0, LIST_W, GetScreenHeight(), COL_PANEL);
         DrawText("Bugs", 16, 16, 28, COL_TEXT);
-        if (Button((Rectangle){ listW - 120, 14, 104, 34 }, "+ New Bug", (Color){ 60, 120, 200, 255 })) {
+        if (Button((Rectangle){ LIST_W - 120, 14, 104, 34 }, "+ New Bug", (Color){ 60, 120, 200, 255 })) {
             AddBug("", "", "", STATUS_OPEN, PRIO_MEDIUM);
             selected = bugCount - 1;
             activeField = FIELD_TITLE;
         }
 
-        for (int i = 0; i < bugCount; i++) {
-            Rectangle row = { 8, 64 + i * 58, listW - 16, 52 };
-            bool hover = CheckCollisionPointRec(GetMousePosition(), row);
+        for (int slot = 0; slot < rowCount; slot++) {
+        int i = slot;   // bug index. Search will later map slot -> matching bug index here
+        Rectangle row = { LIST_MARGIN, LIST_TOP + slot * ROW_PITCH, LIST_W - 2 * LIST_MARGIN, ROW_H };
+        bool hover = CheckCollisionPointRec(GetMousePosition(), row)
+                && CheckCollisionPointRec(GetMousePosition(), listView);
             DrawRectangleRounded(row, 0.15f, 6, (i == selected) ? COL_ROW_SEL : (hover ? ColorBrightness(COL_ROW, 0.1f) : COL_ROW));
             DrawCircle((int)row.x + 16, (int)row.y + 26, 7, statusColors[bugs[i].status]);
 
@@ -168,7 +183,7 @@ int main(void)
         }
 
         // ----- Right panel: bug details -----
-        int px = listW + 30;
+        int px = LIST_W + 30;
         int pw = GetScreenWidth() - px - 30;
 
         if (selected < 0 || selected >= bugCount) {
