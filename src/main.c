@@ -51,6 +51,10 @@ static FieldId activeField = FIELD_NONE;
 
 #define SCROLL_SPEED 40.0f   // pixels moved per mouse-wheel notch
 
+#define SCROLLBAR_W        6      // width of the scrollbar track
+#define SCROLLBAR_MIN_THUMB 30.0f // thumb never gets smaller than this
+#define SCROLLBAR_GRAB      6     // extra pixels either side of the thumb that still count as grabbing it
+
 // ---------- Helpers ----------
 static void AddBug(const char *title, const char *desc, const char *steps, Status s, Priority p)
 {
@@ -141,6 +145,9 @@ int main(void)
            "1. Open Settings", STATUS_RESOLVED, PRIO_MEDIUM);
     selected = 0;
     float listScroll = 0.0f;   // how many pixels the list is scrolled down
+    bool scrollToSelected = false;   // set when we want the selected row brought into view
+    bool  draggingThumb = false;   // true while the user is holding the scrollbar thumb
+    float dragOffsetY   = 0.0f;    // where on the thumb we grabbed it (distance from thumb top to the mouse)
 
     while (!WindowShouldClose())
     {
@@ -161,8 +168,52 @@ int main(void)
         if (CheckCollisionPointRec(GetMousePosition(), listView))
             listScroll -= GetMouseWheelMove() * SCROLL_SPEED;
 
+        if (scrollToSelected) {
+            scrollToSelected = false;
+            if (selected >= 0 && selected < rowCount) {
+                int slot = selected;   // today slot == bug index; search will change this later
+                float rowTop    = slot * ROW_PITCH;
+                float rowBottom = rowTop + ROW_H;
+                if (rowTop < listScroll)
+                    listScroll = rowTop;
+                else if (rowBottom > listScroll + listView.height)
+                    listScroll = rowBottom - listView.height;
+            }
+        }
+
         if (listScroll < 0) listScroll = 0;
         if (listScroll > maxScroll) listScroll = maxScroll;
+
+        // ---- Scrollbar geometry and thumb dragging ----
+        Rectangle track = { LIST_W - SCROLLBAR_W - 1, listView.y + 4, SCROLLBAR_W, listView.height - 8 };
+        float thumbH = 0.0f;
+        float thumbY = track.y;
+
+        if (maxScroll > 0) {
+            thumbH = track.height * (listView.height / contentH);
+            if (thumbH < SCROLLBAR_MIN_THUMB) thumbH = SCROLLBAR_MIN_THUMB;
+            float travel = track.height - thumbH;                 // how far the thumb can slide
+            thumbY = track.y + travel * (listScroll / maxScroll);
+
+            Vector2 m = GetMousePosition();
+            Rectangle grab = { track.x - SCROLLBAR_GRAB, thumbY, track.width + 2 * SCROLLBAR_GRAB, thumbH };
+
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(m, grab)) {
+                draggingThumb = true;
+                dragOffsetY = m.y - thumbY;                       // remember where we grabbed
+            }
+            if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) draggingThumb = false;
+
+            if (draggingThumb && travel > 0) {
+                float newThumbY = m.y - dragOffsetY;              // where the thumb should be now
+                listScroll = (newThumbY - track.y) / travel * maxScroll;   // reverse of the thumbY formula
+                if (listScroll < 0) listScroll = 0;
+                if (listScroll > maxScroll) listScroll = maxScroll;
+                thumbY = track.y + travel * (listScroll / maxScroll);      // recompute so we draw the new position
+            }
+        } else {
+            draggingThumb = false;
+        }
 
         BeginDrawing();
         ClearBackground(COL_BG);
@@ -174,6 +225,7 @@ int main(void)
             AddBug("", "", "", STATUS_OPEN, PRIO_MEDIUM);
             selected = bugCount - 1;
             activeField = FIELD_TITLE;
+            scrollToSelected = true;
         }
 
         for (int slot = 0; slot < rowCount; slot++) {
@@ -184,7 +236,8 @@ int main(void)
             if (row.y + row.height < listView.y || row.y > listView.y + listView.height) continue;
 
             bool hover = CheckCollisionPointRec(GetMousePosition(), row)
-                    && CheckCollisionPointRec(GetMousePosition(), listView);
+                      && CheckCollisionPointRec(GetMousePosition(), listView)
+                      && !draggingThumb;
 
             // Row background and status dot, clipped to the list area
             BeginScissorMode((int)listView.x, (int)listView.y, (int)listView.width, (int)listView.height);
@@ -204,6 +257,14 @@ int main(void)
             EndScissorMode();
 
             if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { selected = i; activeField = FIELD_NONE; }
+        }
+
+        // ----- Scrollbar (only when the list overflows) -----
+        if (maxScroll > 0) {
+            Color thumbCol = (Color){ 110, 118, 140, 255 };
+            if (draggingThumb) thumbCol = ColorBrightness(thumbCol, 0.3f);
+            DrawRectangleRounded(track, 1.0f, 4, (Color){ 24, 26, 31, 255 });
+            DrawRectangleRounded((Rectangle){ track.x, thumbY, track.width, thumbH }, 1.0f, 4, thumbCol);
         }
 
         // ----- Right panel: bug details -----
