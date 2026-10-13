@@ -49,12 +49,6 @@ static FieldId activeField = FIELD_NONE;
 #define ROW_GAP     6                    // space between rows
 #define ROW_PITCH   (ROW_H + ROW_GAP)    // distance from one row's top to the next (58)
 
-#define SCROLL_SPEED 40.0f   // pixels moved per mouse-wheel notch
-
-#define SCROLLBAR_W        6      // width of the scrollbar track
-#define SCROLLBAR_MIN_THUMB 30.0f // thumb never gets smaller than this
-#define SCROLLBAR_GRAB      6     // extra pixels either side of the thumb that still count as grabbing it
-
 // ---------- Helpers ----------
 static void AddBug(const char *title, const char *desc, const char *steps, Status s, Priority p)
 {
@@ -68,6 +62,39 @@ static void AddBug(const char *title, const char *desc, const char *steps, Statu
     b->status = s;
     b->priority = p;
     bugCount++;
+}
+
+#define SAVE_FILE  "bugs.dat"
+#define SAVE_MAGIC 0x31475542   // marks the file as ours, and which format version
+
+static void SaveBugs(void)
+{
+    FILE *f = fopen(SAVE_FILE, "wb");
+    if (!f) return;
+    int magic = SAVE_MAGIC;
+    fwrite(&magic,    sizeof(int), 1, f);
+    fwrite(&bugCount, sizeof(int), 1, f);
+    fwrite(&nextId,   sizeof(int), 1, f);
+    fwrite(bugs, sizeof(Bug), bugCount, f);
+    fclose(f);
+}
+
+static bool LoadBugs(void)
+{
+    FILE *f = fopen(SAVE_FILE, "rb");
+    if (!f) return false;
+
+    int magic = 0, count = 0, id = 0;
+    bool ok = fread(&magic, sizeof(int), 1, f) == 1 && magic == SAVE_MAGIC
+           && fread(&count, sizeof(int), 1, f) == 1 && count >= 0 && count <= MAX_BUGS
+           && fread(&id,    sizeof(int), 1, f) == 1
+           && fread(bugs, sizeof(Bug), count, f) == (size_t)count;
+    fclose(f);
+
+    if (!ok) { bugCount = 0; nextId = 1; return false; }
+    bugCount = count;
+    nextId = id;
+    return true;
 }
 
 // Immediate-mode button: draws AND reports a click in one call.
@@ -137,17 +164,15 @@ int main(void)
     SetExitKey(KEY_NULL);   // so ESC doesn't close the app while you're typing
     SetTargetFPS(60);
 
-    AddBug("Crash when saving empty file", "App segfaults if the user hits Save with no content.",
-           "1. Launch app\n2. Press Ctrl+S immediately", STATUS_OPEN, PRIO_CRITICAL);
-    AddBug("Button label clipped on small windows", "The 'Submit' label is cut off below 800px width.",
-           "1. Resize window to 700px wide", STATUS_IN_PROGRESS, PRIO_LOW);
-    AddBug("Typo on settings page", "'Prefrences' should be 'Preferences'.",
-           "1. Open Settings", STATUS_RESOLVED, PRIO_MEDIUM);
-    selected = 0;
-    float listScroll = 0.0f;   // how many pixels the list is scrolled down
-    bool scrollToSelected = false;   // set when we want the selected row brought into view
-    bool  draggingThumb = false;   // true while the user is holding the scrollbar thumb
-    float dragOffsetY   = 0.0f;    // where on the thumb we grabbed it (distance from thumb top to the mouse)
+        if (!LoadBugs()) {
+        AddBug("Crash when saving empty file", "App segfaults if the user hits Save with no content.",
+               "1. Launch app\n2. Press Ctrl+S immediately", STATUS_OPEN, PRIO_CRITICAL);
+        AddBug("Button label clipped on small windows", "The 'Submit' label is cut off below 800px width.",
+               "1. Resize window to 700px wide", STATUS_IN_PROGRESS, PRIO_LOW);
+        AddBug("Typo on settings page", "'Prefrences' should be 'Preferences'.",
+               "1. Open Settings", STATUS_RESOLVED, PRIO_MEDIUM);
+    }
+    selected = (bugCount > 0) ? 0 : -1;
 
     while (!WindowShouldClose())
     {
@@ -161,60 +186,6 @@ int main(void)
         // search will later set this to the number of matches instead.
         int rowCount = bugCount;
 
-        float contentH  = rowCount * ROW_PITCH;            // total height of all rows
-        float maxScroll = contentH - listView.height;      // how far we can scroll
-        if (maxScroll < 0) maxScroll = 0;                  // everything fits: no scrolling
-
-        if (CheckCollisionPointRec(GetMousePosition(), listView))
-            listScroll -= GetMouseWheelMove() * SCROLL_SPEED;
-
-        if (scrollToSelected) {
-            scrollToSelected = false;
-            if (selected >= 0 && selected < rowCount) {
-                int slot = selected;   // today slot == bug index; search will change this later
-                float rowTop    = slot * ROW_PITCH;
-                float rowBottom = rowTop + ROW_H;
-                if (rowTop < listScroll)
-                    listScroll = rowTop;
-                else if (rowBottom > listScroll + listView.height)
-                    listScroll = rowBottom - listView.height;
-            }
-        }
-
-        if (listScroll < 0) listScroll = 0;
-        if (listScroll > maxScroll) listScroll = maxScroll;
-
-        // ---- Scrollbar geometry and thumb dragging ----
-        Rectangle track = { LIST_W - SCROLLBAR_W - 1, listView.y + 4, SCROLLBAR_W, listView.height - 8 };
-        float thumbH = 0.0f;
-        float thumbY = track.y;
-
-        if (maxScroll > 0) {
-            thumbH = track.height * (listView.height / contentH);
-            if (thumbH < SCROLLBAR_MIN_THUMB) thumbH = SCROLLBAR_MIN_THUMB;
-            float travel = track.height - thumbH;                 // how far the thumb can slide
-            thumbY = track.y + travel * (listScroll / maxScroll);
-
-            Vector2 m = GetMousePosition();
-            Rectangle grab = { track.x - SCROLLBAR_GRAB, thumbY, track.width + 2 * SCROLLBAR_GRAB, thumbH };
-
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(m, grab)) {
-                draggingThumb = true;
-                dragOffsetY = m.y - thumbY;                       // remember where we grabbed
-            }
-            if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) draggingThumb = false;
-
-            if (draggingThumb && travel > 0) {
-                float newThumbY = m.y - dragOffsetY;              // where the thumb should be now
-                listScroll = (newThumbY - track.y) / travel * maxScroll;   // reverse of the thumbY formula
-                if (listScroll < 0) listScroll = 0;
-                if (listScroll > maxScroll) listScroll = maxScroll;
-                thumbY = track.y + travel * (listScroll / maxScroll);      // recompute so we draw the new position
-            }
-        } else {
-            draggingThumb = false;
-        }
-
         BeginDrawing();
         ClearBackground(COL_BG);
 
@@ -225,46 +196,25 @@ int main(void)
             AddBug("", "", "", STATUS_OPEN, PRIO_MEDIUM);
             selected = bugCount - 1;
             activeField = FIELD_TITLE;
-            scrollToSelected = true;
         }
 
         for (int slot = 0; slot < rowCount; slot++) {
-            int i = slot;   // bug index. Search will later map slot -> matching bug index here
-            Rectangle row = { LIST_MARGIN, LIST_TOP + slot * ROW_PITCH - listScroll, LIST_W - 2 * LIST_MARGIN, ROW_H };
-
-            // Skip rows that are entirely outside the visible list area
-            if (row.y + row.height < listView.y || row.y > listView.y + listView.height) continue;
-
-            bool hover = CheckCollisionPointRec(GetMousePosition(), row)
-                      && CheckCollisionPointRec(GetMousePosition(), listView)
-                      && !draggingThumb;
-
-            // Row background and status dot, clipped to the list area
-            BeginScissorMode((int)listView.x, (int)listView.y, (int)listView.width, (int)listView.height);
+        int i = slot;   // bug index. Search will later map slot -> matching bug index here
+        Rectangle row = { LIST_MARGIN, LIST_TOP + slot * ROW_PITCH, LIST_W - 2 * LIST_MARGIN, ROW_H };
+        bool hover = CheckCollisionPointRec(GetMousePosition(), row)
+                && CheckCollisionPointRec(GetMousePosition(), listView);
             DrawRectangleRounded(row, 0.15f, 6, (i == selected) ? COL_ROW_SEL : (hover ? ColorBrightness(COL_ROW, 0.1f) : COL_ROW));
             DrawCircle((int)row.x + 16, (int)row.y + 26, 7, statusColors[bugs[i].status]);
-            EndScissorMode();
 
-            // Text, clipped to the row's text area AND the list area
-            Rectangle textArea = { row.x + 30, row.y, row.width - 38, row.height };
-            Rectangle textClip = GetCollisionRec(textArea, listView);
-            BeginScissorMode((int)textClip.x, (int)textClip.y, (int)textClip.width, (int)textClip.height);
             const char *t = bugs[i].title[0] ? bugs[i].title : "(untitled)";
+            BeginScissorMode((int)row.x + 30, (int)row.y, (int)row.width - 38, (int)row.height);
             DrawText(t, (int)row.x + 32, (int)row.y + 8, 18,
-                    bugs[i].status == STATUS_RESOLVED ? COL_DIM : COL_TEXT);
+                     bugs[i].status == STATUS_RESOLVED ? COL_DIM : COL_TEXT);
             DrawText(TextFormat("#%d  %s", bugs[i].id, prioNames[bugs[i].priority]),
-                    (int)row.x + 32, (int)row.y + 30, 14, prioColors[bugs[i].priority]);
+                     (int)row.x + 32, (int)row.y + 30, 14, prioColors[bugs[i].priority]);
             EndScissorMode();
 
             if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { selected = i; activeField = FIELD_NONE; }
-        }
-
-        // ----- Scrollbar (only when the list overflows) -----
-        if (maxScroll > 0) {
-            Color thumbCol = (Color){ 110, 118, 140, 255 };
-            if (draggingThumb) thumbCol = ColorBrightness(thumbCol, 0.3f);
-            DrawRectangleRounded(track, 1.0f, 4, (Color){ 24, 26, 31, 255 });
-            DrawRectangleRounded((Rectangle){ track.x, thumbY, track.width, thumbH }, 1.0f, 4, thumbCol);
         }
 
         // ----- Right panel: bug details -----
@@ -293,8 +243,10 @@ int main(void)
         }
 
         EndDrawing();
-    }
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) SaveBugs();   // covers button clicks and leaving a field
 
+    }
+    SaveBugs();
     CloseWindow();
     return 0;
 }
