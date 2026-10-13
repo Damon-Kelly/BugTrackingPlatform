@@ -144,6 +144,7 @@ int main(void)
            "1. Open Settings", STATUS_RESOLVED, PRIO_MEDIUM);
     selected = 0;
     float listScroll = 0.0f;   // how many pixels the list is scrolled down
+    bool scrollToSelected = false;   // set when we want the selected row brought into view
 
     while (!WindowShouldClose())
     {
@@ -164,6 +165,19 @@ int main(void)
         if (CheckCollisionPointRec(GetMousePosition(), listView))
             listScroll -= GetMouseWheelMove() * SCROLL_SPEED;
 
+        if (scrollToSelected) {
+            scrollToSelected = false;
+            if (selected >= 0 && selected < rowCount) {
+                int slot = selected;   // today slot == bug index; search will change this later
+                float rowTop    = slot * ROW_PITCH;
+                float rowBottom = rowTop + ROW_H;
+                if (rowTop < listScroll)
+                    listScroll = rowTop;
+                else if (rowBottom > listScroll + listView.height)
+                    listScroll = rowBottom - listView.height;
+            }
+        }
+
         if (listScroll < 0) listScroll = 0;
         if (listScroll > maxScroll) listScroll = maxScroll;
 
@@ -177,6 +191,7 @@ int main(void)
             AddBug("", "", "", STATUS_OPEN, PRIO_MEDIUM);
             selected = bugCount - 1;
             activeField = FIELD_TITLE;
+            scrollToSelected = true;
         }
 
         for (int slot = 0; slot < rowCount; slot++) {
