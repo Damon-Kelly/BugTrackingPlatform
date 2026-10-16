@@ -79,3 +79,5 @@ android.*
 !src/minshell.html
 !src/shell.html
 build/
+
+bugs.dat
