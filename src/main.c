@@ -56,6 +56,18 @@ static FieldId activeField = FIELD_NONE;
 #define SCROLLBAR_GRAB      6     // extra pixels either side of the thumb that still count as grabbing it
 
 // ---------- Helpers ----------
+static Font uiFont;
+#define FONT_SPACING 0.5f
+
+static void UIText(const char *s, int x, int y, int size, Color c)
+{
+    DrawTextEx(uiFont, s, (Vector2){ (float)x, (float)y }, (float)size, FONT_SPACING, c);
+}
+
+static int UIWidth(const char *s, int size)
+{
+    return (int)MeasureTextEx(uiFont, s, (float)size, FONT_SPACING).x;
+}
 static void AddBug(const char *title, const char *desc, const char *steps, Status s, Priority p)
 {
     if (bugCount >= MAX_BUGS) return;
@@ -109,15 +121,15 @@ static bool Button(Rectangle r, const char *label, Color base)
     bool hover = CheckCollisionPointRec(GetMousePosition(), r);
     Color c = hover ? ColorBrightness(base, 0.2f) : base;
     DrawRectangleRounded(r, 0.2f, 6, c);
-    int w = MeasureText(label, 18);
-    DrawText(label, (int)(r.x + (r.width - w) / 2), (int)(r.y + (r.height - 18) / 2), 18, WHITE);
+    int w = UIWidth(label, 18);
+    UIText(label, (int)(r.x + (r.width - w) / 2), (int)(r.y + (r.height - 18) / 2), 18, WHITE);
     return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
 // Text field. Edits `buf` in place when it is the active field.
 static void TextField(Rectangle r, const char *label, char *buf, int cap, FieldId id, bool multiline)
 {
-    DrawText(label, (int)r.x, (int)r.y - 20, 16, COL_DIM);
+    UIText(label, (int)r.x, (int)r.y - 20, 16, COL_DIM);
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), r))
         activeField = id;
@@ -150,10 +162,10 @@ static void TextField(Rectangle r, const char *label, char *buf, int cap, FieldI
             if (n > 255) n = 255;
             memcpy(line, p, n);
             line[n] = '\0';
-            DrawText(line, (int)r.x + 8, y, 18, COL_TEXT);
+            UIText(line, (int)r.x + 8, y, 18, COL_TEXT);
             if (!nl) {   // last line: draw blinking cursor after it
                 if (active && ((int)(GetTime() * 2) % 2 == 0))
-                    DrawRectangle((int)r.x + 8 + MeasureText(line, 18) + 2, y, 2, 18, COL_TEXT);
+                    DrawRectangle((int)r.x + 8 + UIWidth(line, 18) + 2, y, 2, 18, COL_TEXT);
                 break;
             }
             p = nl + 1;
@@ -166,9 +178,12 @@ static void TextField(Rectangle r, const char *label, char *buf, int cap, FieldI
 // ---------- Main ----------
 int main(void)
 {
-    InitWindow(1100, 700, "Bug Tracker");
+    InitWindow(1600, 900, "Bug Tracker");
     SetExitKey(KEY_NULL);   // so ESC doesn't close the app while you're typing
     SetTargetFPS(60);
+    uiFont = LoadFontEx("fonts/Roboto-Regular.ttf", 32, NULL, 0);
+    if (uiFont.texture.id == 0) uiFont = GetFontDefault();   // fallback if the file isn't found
+    SetTextureFilter(uiFont.texture, TEXTURE_FILTER_BILINEAR);
 
     if (!LoadBugs()) {
         AddBug("Crash when saving empty file", "App segfaults if the user hits Save with no content.",
@@ -255,7 +270,7 @@ int main(void)
 
         // ----- Left panel: bug list -----
         DrawRectangle(0, 0, LIST_W, GetScreenHeight(), COL_PANEL);
-        DrawText("Bugs", 16, 16, 28, COL_TEXT);
+        UIText("Bugs", 16, 16, 28, COL_TEXT);
         if (Button((Rectangle){ LIST_W - 120, 14, 104, 34 }, "+ New Bug", (Color){ 60, 120, 200, 255 })) {
             AddBug("", "", "", STATUS_OPEN, PRIO_MEDIUM);
             selected = bugCount - 1;
@@ -285,9 +300,9 @@ int main(void)
             Rectangle textClip = GetCollisionRec(textArea, listView);
             BeginScissorMode((int)textClip.x, (int)textClip.y, (int)textClip.width, (int)textClip.height);
             const char *t = bugs[i].title[0] ? bugs[i].title : "(untitled)";
-            DrawText(t, (int)row.x + 32, (int)row.y + 8, 18,
+            UIText(t, (int)row.x + 32, (int)row.y + 8, 18,
                      bugs[i].status == STATUS_RESOLVED ? COL_DIM : COL_TEXT);
-            DrawText(TextFormat("#%d  %s", bugs[i].id, prioNames[bugs[i].priority]),
+            UIText(TextFormat("#%d  %s", bugs[i].id, prioNames[bugs[i].priority]),
                      (int)row.x + 32, (int)row.y + 30, 14, prioColors[bugs[i].priority]);
             EndScissorMode();
 
@@ -307,10 +322,10 @@ int main(void)
         int pw = GetScreenWidth() - px - 30;
 
         if (selected < 0 || selected >= bugCount) {
-            DrawText("Select a bug, or create a new one.", px, 40, 22, COL_DIM);
+            UIText("Select a bug, or create a new one.", px, 40, 22, COL_DIM);
         } else {
             Bug *b = &bugs[selected];
-            DrawText(TextFormat("Bug #%d", b->id), px, 20, 28, COL_TEXT);
+            UIText(TextFormat("Bug #%d", b->id), px, 20, 28, COL_TEXT);
 
             // Status / priority / resolve buttons. Click to cycle.
             if (Button((Rectangle){ px + pw - 480, 18, 150, 36 }, statusNames[b->status], statusColors[b->status]))
@@ -324,7 +339,7 @@ int main(void)
             TextField((Rectangle){ px, 190, pw, 190 }, "Description",        b->description, sizeof(b->description), FIELD_DESC,  true);
             TextField((Rectangle){ px, 430, pw, 190 }, "Steps to reproduce", b->steps,       sizeof(b->steps),       FIELD_STEPS, true);
 
-            DrawText("Click a field to edit. Enter = newline in multi-line fields.", px, 650, 16, COL_DIM);
+            UIText("Click a field to edit. Enter = newline in multi-line fields.", px, 650, 16, COL_DIM);
         }
 
         EndDrawing();
@@ -332,6 +347,7 @@ int main(void)
 
     }
     SaveBugs();
+    UnloadFont(uiFont);
     CloseWindow();
     return 0;
 }
