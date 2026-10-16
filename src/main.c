@@ -137,13 +137,15 @@ int main(void)
     SetExitKey(KEY_NULL);   // so ESC doesn't close the app while you're typing
     SetTargetFPS(60);
 
-    AddBug("Crash when saving empty file", "App segfaults if the user hits Save with no content.",
-           "1. Launch app\n2. Press Ctrl+S immediately", STATUS_OPEN, PRIO_CRITICAL);
-    AddBug("Button label clipped on small windows", "The 'Submit' label is cut off below 800px width.",
-           "1. Resize window to 700px wide", STATUS_IN_PROGRESS, PRIO_LOW);
-    AddBug("Typo on settings page", "'Prefrences' should be 'Preferences'.",
-           "1. Open Settings", STATUS_RESOLVED, PRIO_MEDIUM);
-    selected = 0;
+    if (!LoadBugs()) {
+        AddBug("Crash when saving empty file", "App segfaults if the user hits Save with no content.",
+               "1. Launch app\n2. Press Ctrl+S immediately", STATUS_OPEN, PRIO_CRITICAL);
+        AddBug("Button label clipped on small windows", "The 'Submit' label is cut off below 800px width.",
+               "1. Resize window to 700px wide", STATUS_IN_PROGRESS, PRIO_LOW);
+        AddBug("Typo on settings page", "'Prefrences' should be 'Preferences'.",
+               "1. Open Settings", STATUS_RESOLVED, PRIO_MEDIUM);
+            }
+    selected = (bugCount > 0) ? 0 : -1;
     float listScroll = 0.0f;   // how many pixels the list is scrolled down
     bool scrollToSelected = false;   // set when we want the selected row brought into view
     bool  draggingThumb = false;   // true while the user is holding the scrollbar thumb
