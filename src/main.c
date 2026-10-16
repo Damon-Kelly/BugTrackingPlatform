@@ -70,39 +70,6 @@ static void AddBug(const char *title, const char *desc, const char *steps, Statu
     bugCount++;
 }
 
-#define SAVE_FILE  "bugs.dat"
-#define SAVE_MAGIC 0x31475542   // marks the file as ours, and which format version
-
-static void SaveBugs(void)
-{
-    FILE *f = fopen(SAVE_FILE, "wb");
-    if (!f) return;
-    int magic = SAVE_MAGIC;
-    fwrite(&magic,    sizeof(int), 1, f);
-    fwrite(&bugCount, sizeof(int), 1, f);
-    fwrite(&nextId,   sizeof(int), 1, f);
-    fwrite(bugs, sizeof(Bug), bugCount, f);
-    fclose(f);
-}
-
-static bool LoadBugs(void)
-{
-    FILE *f = fopen(SAVE_FILE, "rb");
-    if (!f) return false;
-
-    int magic = 0, count = 0, id = 0;
-    bool ok = fread(&magic, sizeof(int), 1, f) == 1 && magic == SAVE_MAGIC
-           && fread(&count, sizeof(int), 1, f) == 1 && count >= 0 && count <= MAX_BUGS
-           && fread(&id,    sizeof(int), 1, f) == 1
-           && fread(bugs, sizeof(Bug), count, f) == (size_t)count;
-    fclose(f);
-
-    if (!ok) { bugCount = 0; nextId = 1; return false; }
-    bugCount = count;
-    nextId = id;
-    return true;
-}
-
 // Immediate-mode button: draws AND reports a click in one call.
 static bool Button(Rectangle r, const char *label, Color base)
 {
@@ -264,13 +231,13 @@ int main(void)
         }
 
         for (int slot = 0; slot < rowCount; slot++) {
-        int i = slot;   // bug index. Search will later map slot -> matching bug index here
+            int i = slot;   // bug index. Search will later map slot -> matching bug index here
             Rectangle row = { LIST_MARGIN, LIST_TOP + slot * ROW_PITCH - listScroll, LIST_W - 2 * LIST_MARGIN, ROW_H };
 
             // Skip rows that are entirely outside the visible list area
             if (row.y + row.height < listView.y || row.y > listView.y + listView.height) continue;
 
-        bool hover = CheckCollisionPointRec(GetMousePosition(), row)
+            bool hover = CheckCollisionPointRec(GetMousePosition(), row)
                       && CheckCollisionPointRec(GetMousePosition(), listView)
                       && !draggingThumb;
 
@@ -286,9 +253,9 @@ int main(void)
             BeginScissorMode((int)textClip.x, (int)textClip.y, (int)textClip.width, (int)textClip.height);
             const char *t = bugs[i].title[0] ? bugs[i].title : "(untitled)";
             DrawText(t, (int)row.x + 32, (int)row.y + 8, 18,
-                     bugs[i].status == STATUS_RESOLVED ? COL_DIM : COL_TEXT);
+                    bugs[i].status == STATUS_RESOLVED ? COL_DIM : COL_TEXT);
             DrawText(TextFormat("#%d  %s", bugs[i].id, prioNames[bugs[i].priority]),
-                     (int)row.x + 32, (int)row.y + 30, 14, prioColors[bugs[i].priority]);
+                    (int)row.x + 32, (int)row.y + 30, 14, prioColors[bugs[i].priority]);
             EndScissorMode();
 
             if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { selected = i; activeField = FIELD_NONE; }
@@ -328,10 +295,8 @@ int main(void)
         }
 
         EndDrawing();
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) SaveBugs();   // covers button clicks and leaving a field
-
     }
-    SaveBugs();
+
     CloseWindow();
     return 0;
 }
