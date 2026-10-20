@@ -133,10 +133,12 @@ static bool ContainsIgnoreCase(const char *hay, const char *needle)
     return false;
 }
 
-// Does this bug match the search text? Today: title or description.
-// Status/priority filters can add conditions here later.
-static bool BugMatches(const Bug *b, const char *query)
+// Should this bug appear in the list? It must pass BOTH tests:
+//   1. its status chip is switched on, and
+//   2. the search text appears in its title or description.
+static bool BugMatches(const Bug *b, const char *query, const bool *statusOn)
 {
+    if (!statusOn[b->status]) return false;   // status chip is off: hide it straight away
     return ContainsIgnoreCase(b->title, query) || ContainsIgnoreCase(b->description, query);
 }
 
@@ -254,11 +256,11 @@ int main(void)
         Rectangle listView = { 0, LIST_TOP, LIST_W, GetScreenHeight() - LIST_TOP };
 
         // Build the list of bugs to show: visible[slot] = index into bugs[].
-        // rowCount = how many rows the list has after filtering by the search text.
+        // rowCount = how many rows the list has after filtering by search text and status chips.
         int visible[MAX_BUGS];
         int rowCount = 0;
         for (int k = 0; k < bugCount; k++)
-            if (BugMatches(&bugs[k], searchQuery)) visible[rowCount++] = k;
+            if (BugMatches(&bugs[k], searchQuery, statusOn)) visible[rowCount++] = k;
         
         // If the search text changed, jump back to the top of the (new) list
         if (strcmp(searchQuery, prevQuery) != 0) {
