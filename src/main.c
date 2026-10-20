@@ -40,13 +40,13 @@ static FieldId activeField = FIELD_NONE;
 #define COL_ROW_SEL (Color){ 65, 90, 140, 255 }
 #define COL_TEXT    (Color){ 230, 232, 238, 255 }
 #define COL_DIM     (Color){ 140, 146, 160, 255 }
-#define LINE_H      22
+#define LINE_H      28
 
 // List panel layout
-#define LIST_W      340                  // width of the left panel
-#define LIST_TOP    108                  // y where the first row starts (below the header)
+#define LIST_W      420                  // width of the left panel
+#define LIST_TOP    148                   // y where the first row starts (below the header)
 #define LIST_MARGIN 8                    // gap between panel edge and rows
-#define ROW_H       52                   // height of one row
+#define ROW_H       64                   // height of one row
 #define ROW_GAP     6                    // space between rows
 #define ROW_PITCH   (ROW_H + ROW_GAP)    // distance from one row's top to the next (58)
 
@@ -141,15 +141,15 @@ static bool Button(Rectangle r, const char *label, Color base)
     bool hover = CheckCollisionPointRec(GetMousePosition(), r);
     Color c = hover ? ColorBrightness(base, 0.2f) : base;
     DrawRectangleRounded(r, 0.2f, 6, c);
-    int w = UIWidth(label, 18);
-    UIText(label, (int)(r.x + (r.width - w) / 2), (int)(r.y + (r.height - 18) / 2), 18, WHITE);
+    int w = UIWidth(label, 22);
+    UIText(label, (int)(r.x + (r.width - w) / 2), (int)(r.y + (r.height - 22) / 2), 22, WHITE);
     return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
 // Text field. Edits `buf` in place when it is the active field.
 static void TextField(Rectangle r, const char *label, char *buf, int cap, FieldId id, bool multiline)
 {
-    UIText(label, (int)r.x, (int)r.y - 20, 16, COL_DIM);
+    UIText(label, (int)r.x, (int)r.y - 20, 20, COL_DIM);
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), r))
         activeField = id;
@@ -182,10 +182,10 @@ static void TextField(Rectangle r, const char *label, char *buf, int cap, FieldI
             if (n > 255) n = 255;
             memcpy(line, p, n);
             line[n] = '\0';
-            UIText(line, (int)r.x + 8, y, 18, COL_TEXT);
+            UIText(line, (int)r.x + 8, y, 22, COL_TEXT);
             if (!nl) {   // last line: draw blinking cursor after it
                 if (active && ((int)(GetTime() * 2) % 2 == 0))
-                    DrawRectangle((int)r.x + 8 + UIWidth(line, 18) + 2, y, 2, 18, COL_TEXT);
+                    DrawRectangle((int)r.x + 8 + UIWidth(line, 22) + 2, y, 2, 22, COL_TEXT);
                 break;
             }
             p = nl + 1;
@@ -202,7 +202,7 @@ int main(void)
     InitWindow(1600, 900, "Bug Tracker");
     SetExitKey(KEY_NULL);   // so ESC doesn't close the app while you're typing
     SetTargetFPS(60);
-    uiFont = LoadFontEx("fonts/Roboto-Regular.ttf", 32, NULL, 0);
+    uiFont = LoadFontEx("fonts/Roboto-Regular.ttf", 48, NULL, 0);
     if (uiFont.texture.id == 0) uiFont = GetFontDefault();   // fallback if the file isn't found
     SetTextureFilter(uiFont.texture, TEXTURE_FILTER_BILINEAR);
 
@@ -307,8 +307,8 @@ int main(void)
 
         // ----- Left panel: bug list -----
         DrawRectangle(0, 0, LIST_W, GetScreenHeight(), COL_PANEL);
-        UIText("Bugs", 16, 16, 28, COL_TEXT);
-        if (Button((Rectangle){ LIST_W - 120, 14, 104, 34 }, "+ New Bug", (Color){ 60, 120, 200, 255 })) {
+        UIText("Bugs", 16, 14, 34, COL_TEXT);
+        if (Button((Rectangle){ LIST_W - 140, 14, 124, 38 }, "+ New Bug", (Color){ 60, 120, 200, 255 })) {
             AddBug("", "", "", STATUS_OPEN, PRIO_MEDIUM);
             selected = bugCount - 1;
             activeField = FIELD_TITLE;
@@ -352,7 +352,7 @@ int main(void)
             // Row background and status dot, clipped to the list area
             BeginScissorMode((int)listView.x, (int)listView.y, (int)listView.width, (int)listView.height);
             DrawRectangleRounded(row, 0.15f, 6, (i == selected) ? COL_ROW_SEL : (hover ? ColorBrightness(COL_ROW, 0.1f) : COL_ROW));
-            DrawCircle((int)row.x + 16, (int)row.y + 26, 7, statusColors[bugs[i].status]);
+            DrawCircle((int)row.x + 16, (int)row.y + 32, 8, statusColors[bugs[i].status]);
             EndScissorMode();
 
             // Text, clipped to the row's text area AND the list area
@@ -360,10 +360,10 @@ int main(void)
             Rectangle textClip = GetCollisionRec(textArea, listView);
             BeginScissorMode((int)textClip.x, (int)textClip.y, (int)textClip.width, (int)textClip.height);
             const char *t = bugs[i].title[0] ? bugs[i].title : "(untitled)";
-            UIText(t, (int)row.x + 32, (int)row.y + 8, 18,
+            UIText(t, (int)row.x + 32, (int)row.y + 9, 22,
                      bugs[i].status == STATUS_RESOLVED ? COL_DIM : COL_TEXT);
             UIText(TextFormat("#%d  %s", bugs[i].id, prioNames[bugs[i].priority]),
-                     (int)row.x + 32, (int)row.y + 30, 14, prioColors[bugs[i].priority]);
+                     (int)row.x + 32, (int)row.y + 34, 17, prioColors[bugs[i].priority]);
             EndScissorMode();
 
             if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { selected = i; activeField = FIELD_NONE; }
@@ -387,10 +387,10 @@ int main(void)
         int pw = GetScreenWidth() - px - 30;
 
         if (selected < 0 || selected >= bugCount) {
-            UIText("Select a bug, or create a new one.", px, 40, 22, COL_DIM);
+            UIText("Select a bug, or create a new one.", px, 40, 26, COL_DIM);
         } else {
             Bug *b = &bugs[selected];
-            UIText(TextFormat("Bug #%d", b->id), px, 20, 28, COL_TEXT);
+            UIText(TextFormat("Bug #%d", b->id), px, 18, 34, COL_TEXT);
 
             // Status / priority / resolve buttons. Click to cycle.
             if (Button((Rectangle){ px + pw - 480, 18, 150, 36 }, statusNames[b->status], statusColors[b->status]))
@@ -400,11 +400,19 @@ int main(void)
             if (Button((Rectangle){ px + pw - 160, 18, 160, 36 }, "Mark Resolved", (Color){ 60, 140, 80, 255 }))
                 b->status = STATUS_RESOLVED;
 
-            TextField((Rectangle){ px, 100, pw, 38 },  "Title",              b->title,       sizeof(b->title),       FIELD_TITLE, false);
-            TextField((Rectangle){ px, 190, pw, 190 }, "Description",        b->description, sizeof(b->description), FIELD_DESC,  true);
-            TextField((Rectangle){ px, 430, pw, 190 }, "Steps to reproduce", b->steps,       sizeof(b->steps),       FIELD_STEPS, true);
+            // Layout computed from the window height so it fills any size
+            int titleY  = 100, titleH = 44;
+            int labelGap = 50;                                   // room for the label above each box
+            int bottom  = GetScreenHeight() - 70;                // leave space for the hint line
+            int areaH   = (bottom - (titleY + titleH) - 2 * labelGap) / 2;
+            int descY   = titleY + titleH + labelGap;
+            int stepsY  = descY + areaH + labelGap;
 
-            UIText("Click a field to edit. Enter = newline in multi-line fields.", px, 650, 16, COL_DIM);
+            TextField((Rectangle){ px, titleY, pw, titleH }, "Title",              b->title,       sizeof(b->title),       FIELD_TITLE, false);
+            TextField((Rectangle){ px, descY,  pw, areaH  }, "Description",        b->description, sizeof(b->description), FIELD_DESC,  true);
+            TextField((Rectangle){ px, stepsY, pw, areaH  }, "Steps to reproduce", b->steps,       sizeof(b->steps),       FIELD_STEPS, true);
+
+            UIText("Click a field to edit. Enter = newline in multi-line fields.", px, GetScreenHeight() - 40, 20, COL_DIM);
         }
 
         EndDrawing();
