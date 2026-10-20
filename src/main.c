@@ -178,6 +178,7 @@ static void TextField(Rectangle r, const char *label, char *buf, int cap, FieldI
 // ---------- Main ----------
 int main(void)
 {
+    ChangeDirectory(GetApplicationDirectory());   // make relative paths resolve next to the executable
     InitWindow(1600, 900, "Bug Tracker");
     SetExitKey(KEY_NULL);   // so ESC doesn't close the app while you're typing
     SetTargetFPS(60);
