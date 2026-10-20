@@ -315,7 +315,7 @@ int main(void)
             scrollToSelected = true;
             searchQuery[0] = '\0';
         }
-        
+
         // Show "3 of 12" next to the title while a search is active
         if (searchQuery[0] != '\0') {
             int titleW = UIWidth("Bugs", 28);   // measured width of the title in the UI font
@@ -327,6 +327,16 @@ int main(void)
         TextField(searchBox, "", searchQuery, sizeof(searchQuery), FIELD_SEARCH, false);
         if (searchQuery[0] == '\0' && activeField != FIELD_SEARCH)
             UIText("Search bugs...", (int)searchBox.x + 8, (int)searchBox.y + 8, 18, COL_DIM);
+
+        
+        // Clear button: only shown while there is text in the search box
+        if (searchQuery[0] != '\0') {
+            Rectangle clearBtn = { searchBox.x + searchBox.width - 32, searchBox.y + 6, 26, 26 };
+            if (Button(clearBtn, "x", (Color){ 70, 74, 86, 255 })) {
+                searchQuery[0] = '\0';        // empty the string: first byte becomes the terminator
+                activeField = FIELD_SEARCH;   // keep focus in the box so the user can type a new search
+            }
+        }
 
         for (int slot = 0; slot < rowCount; slot++) {
         int i = visible[slot];   // bug index. Search will later map slot -> matching bug index here
