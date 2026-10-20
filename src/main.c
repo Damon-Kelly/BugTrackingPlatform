@@ -44,11 +44,16 @@ static FieldId activeField = FIELD_NONE;
 
 // List panel layout
 #define LIST_W      340                  // width of the left panel
-#define LIST_TOP    108                  // y where the first row starts (below the header)
+#define LIST_TOP    148                  // y where the first row starts (below the header)
 #define LIST_MARGIN 8                    // gap between panel edge and rows
 #define ROW_H       52                   // height of one row
 #define ROW_GAP     6                    // space between rows
 #define ROW_PITCH   (ROW_H + ROW_GAP)    // distance from one row's top to the next (58)
+
+// Status filter chips (header row 3, under the search box)
+#define CHIP_Y      104                  // top of the chip row (search box ends at y=96)
+#define CHIP_H      32                   // chip height; the row ends at y=136, leaving 12px before LIST_TOP
+#define CHIP_GAP    6                    // space between chips
 
 #define SCROLL_SPEED 40.0f   // pixels moved per mouse-wheel notch
 
@@ -146,6 +151,23 @@ static bool Button(Rectangle r, const char *label, Color base)
     return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
+// Toggle chip: filled with its color when ON, dark and dim when OFF.
+// Like Button, it draws AND returns true on the frame it is clicked. The caller flips the bool.
+static bool Chip(Rectangle r, const char *label, bool on, Color onColor)
+{
+    bool hover = CheckCollisionPointRec(GetMousePosition(), r);
+
+    Color fill = on ? onColor : (Color){ 24, 26, 31, 255 };
+    if (hover) fill = ColorBrightness(fill, 0.15f);
+    DrawRectangleRounded(r, 0.4f, 6, fill);
+    if (!on) DrawRectangleRoundedLinesEx(r, 0.4f, 6, 1.0f, (Color){ 70, 74, 86, 255 });
+
+    int w = UIWidth(label, 16);
+    UIText(label, (int)(r.x + (r.width - w) / 2), (int)(r.y + (r.height - 16) / 2), 16, on ? WHITE : COL_DIM);
+
+    return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
 // Text field. Edits `buf` in place when it is the active field.
 static void TextField(Rectangle r, const char *label, char *buf, int cap, FieldId id, bool multiline)
 {
@@ -221,6 +243,7 @@ int main(void)
     float dragOffsetY   = 0.0f;    // where on the thumb we grabbed it (distance from thumb top to the mouse)
     char searchQuery[64] = "";     // what the user has typed in the search box
     char prevQuery[64]   = "";     // the query from the previous frame, to detect changes
+    bool statusOn[STATUS_COUNT] = { true, true, true };   // which statuses are shown (all on = no status filtering)
 
     while (!WindowShouldClose())
     {
@@ -336,6 +359,14 @@ int main(void)
                 searchQuery[0] = '\0';        // empty the string: first byte becomes the terminator
                 activeField = FIELD_SEARCH;   // keep focus in the box so the user can type a new search
             }
+        }
+
+        // ----- Status filter chips (header row 3) -----
+        float chipW = (LIST_W - 2 * LIST_MARGIN - (STATUS_COUNT - 1) * CHIP_GAP) / (float)STATUS_COUNT;
+        for (int s = 0; s < STATUS_COUNT; s++) {
+            Rectangle chip = { LIST_MARGIN + s * (chipW + CHIP_GAP), CHIP_Y, chipW, CHIP_H };
+            if (Chip(chip, statusNames[s], statusOn[s], statusColors[s]))
+                statusOn[s] = !statusOn[s];
         }
 
         for (int slot = 0; slot < rowCount; slot++) {
