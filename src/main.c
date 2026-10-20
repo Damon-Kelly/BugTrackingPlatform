@@ -30,7 +30,7 @@ static Color statusColors[STATUS_COUNT]      = { { 220, 80, 80, 255 }, { 230, 17
 static Color prioColors[PRIO_COUNT]          = { { 130, 140, 150, 255 }, { 70, 130, 200, 255 }, { 230, 140, 40, 255 }, { 200, 50, 50, 255 } };
 
 // ---------- UI state ----------
-typedef enum { FIELD_NONE, FIELD_TITLE, FIELD_DESC, FIELD_STEPS } FieldId;
+typedef enum { FIELD_NONE, FIELD_TITLE, FIELD_DESC, FIELD_STEPS, FIELD_SEARCH } FieldId;
 static FieldId activeField = FIELD_NONE;
 
 #define COL_BG      (Color){ 30, 32, 38, 255 }
@@ -43,7 +43,7 @@ static FieldId activeField = FIELD_NONE;
 
 // List panel layout
 #define LIST_W      340                  // width of the left panel
-#define LIST_TOP    64                   // y where the first row starts (below the header)
+#define LIST_TOP    108                  // y where the first row starts (below the header)
 #define LIST_MARGIN 8                    // gap between panel edge and rows
 #define ROW_H       52                   // height of one row
 #define ROW_GAP     6                    // space between rows
@@ -199,6 +199,7 @@ int main(void)
     bool scrollToSelected = false;   // set when we want the selected row brought into view
     bool  draggingThumb = false;   // true while the user is holding the scrollbar thumb
     float dragOffsetY   = 0.0f;    // where on the thumb we grabbed it (distance from thumb top to the mouse)
+    char searchQuery[64] = "";     // what the user has typed in the search box
 
     while (!WindowShouldClose())
     {
@@ -278,6 +279,12 @@ int main(void)
             activeField = FIELD_TITLE;
             scrollToSelected = true;
         }
+
+        // ----- Search box (header row 2) -----
+        Rectangle searchBox = { LIST_MARGIN, 58, LIST_W - 2 * LIST_MARGIN, 38 };
+        TextField(searchBox, "", searchQuery, sizeof(searchQuery), FIELD_SEARCH, false);
+        if (searchQuery[0] == '\0' && activeField != FIELD_SEARCH)
+            DrawText("Search bugs...", (int)searchBox.x + 8, (int)searchBox.y + 8, 18, COL_DIM);
 
         for (int slot = 0; slot < rowCount; slot++) {
         int i = slot;   // bug index. Search will later map slot -> matching bug index here
