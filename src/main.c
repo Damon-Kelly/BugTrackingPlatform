@@ -3,6 +3,7 @@
 #include "raylib.h"
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
 
 // ---------- Data model ----------
 #define MAX_BUGS 128
@@ -30,7 +31,7 @@ static Color statusColors[STATUS_COUNT]      = { { 220, 80, 80, 255 }, { 230, 17
 static Color prioColors[PRIO_COUNT]          = { { 130, 140, 150, 255 }, { 70, 130, 200, 255 }, { 230, 140, 40, 255 }, { 200, 50, 50, 255 } };
 
 // ---------- UI state ----------
-typedef enum { FIELD_NONE, FIELD_TITLE, FIELD_DESC, FIELD_STEPS } FieldId;
+typedef enum { FIELD_NONE, FIELD_TITLE, FIELD_DESC, FIELD_STEPS, FIELD_SEARCH } FieldId;
 static FieldId activeField = FIELD_NONE;
 
 #define COL_BG      (Color){ 30, 32, 38, 255 }
@@ -43,7 +44,7 @@ static FieldId activeField = FIELD_NONE;
 
 // List panel layout
 #define LIST_W      420                  // width of the left panel
-#define LIST_TOP    64                   // y where the first row starts (below the header)
+#define LIST_TOP    148                   // y where the first row starts (below the header)
 #define LIST_MARGIN 8                    // gap between panel edge and rows
 #define ROW_H       64                   // height of one row
 #define ROW_GAP     6                    // space between rows
@@ -115,6 +116,25 @@ static bool LoadBugs(void)
     return true;
 }
 
+// Case-insensitive substring search: does `needle` appear anywhere inside `hay`?
+static bool ContainsIgnoreCase(const char *hay, const char *needle)
+{
+    if (needle[0] == '\0') return true;          // empty search matches everything
+    for (; *hay; hay++) {                        // try starting the match at each position in hay
+        const char *h = hay, *n = needle;
+        while (*h && *n && tolower((unsigned char)*h) == tolower((unsigned char)*n)) { h++; n++; }
+        if (*n == '\0') return true;             // we consumed the whole needle: it's a match
+    }
+    return false;
+}
+
+// Does this bug match the search text? Today: title or description.
+// Status/priority filters can add conditions here later.
+static bool BugMatches(const Bug *b, const char *query)
+{
+    return ContainsIgnoreCase(b->title, query) || ContainsIgnoreCase(b->description, query);
+}
+
 // Immediate-mode button: draws AND reports a click in one call.
 static bool Button(Rectangle r, const char *label, Color base)
 {
@@ -178,6 +198,7 @@ static void TextField(Rectangle r, const char *label, char *buf, int cap, FieldI
 // ---------- Main ----------
 int main(void)
 {
+    ChangeDirectory(GetApplicationDirectory());   // make relative paths resolve next to the executable
     InitWindow(1600, 900, "Bug Tracker");
     SetExitKey(KEY_NULL);   // so ESC doesn't close the app while you're typing
     SetTargetFPS(60);
@@ -198,6 +219,8 @@ int main(void)
     bool scrollToSelected = false;   // set when we want the selected row brought into view
     bool  draggingThumb = false;   // true while the user is holding the scrollbar thumb
     float dragOffsetY   = 0.0f;    // where on the thumb we grabbed it (distance from thumb top to the mouse)
+    char searchQuery[64] = "";     // what the user has typed in the search box
+    char prevQuery[64]   = "";     // the query from the previous frame, to detect changes
 
     while (!WindowShouldClose())
     {
@@ -207,9 +230,18 @@ int main(void)
         // The visible window onto the list. Rows outside this rectangle are scrolled out of view.
         Rectangle listView = { 0, LIST_TOP, LIST_W, GetScreenHeight() - LIST_TOP };
 
-        // How many rows the list is showing. Today that's every bug;
-        // search will later set this to the number of matches instead.
-        int rowCount = bugCount;
+        // Build the list of bugs to show: visible[slot] = index into bugs[].
+        // rowCount = how many rows the list has after filtering by the search text.
+        int visible[MAX_BUGS];
+        int rowCount = 0;
+        for (int k = 0; k < bugCount; k++)
+            if (BugMatches(&bugs[k], searchQuery)) visible[rowCount++] = k;
+        
+        // If the search text changed, jump back to the top of the (new) list
+        if (strcmp(searchQuery, prevQuery) != 0) {
+            snprintf(prevQuery, sizeof(prevQuery), "%s", searchQuery);
+            listScroll = 0.0f;
+        }
 
         float contentH  = rowCount * ROW_PITCH;            // total height of all rows
         float maxScroll = contentH - listView.height;      // how far we can scroll
@@ -220,8 +252,13 @@ int main(void)
 
         if (scrollToSelected) {
             scrollToSelected = false;
-            if (selected >= 0 && selected < rowCount) {
-                int slot = selected;   // today slot == bug index; search will change this later
+
+            // Find which on-screen slot shows the selected bug (it may not be visible at all)
+            int slot = -1;
+            for (int k = 0; k < rowCount; k++)
+                if (visible[k] == selected) { slot = k; break; }
+
+            if (slot >= 0) {
                 float rowTop    = slot * ROW_PITCH;
                 float rowBottom = rowTop + ROW_H;
                 if (rowTop < listScroll)
@@ -276,10 +313,33 @@ int main(void)
             selected = bugCount - 1;
             activeField = FIELD_TITLE;
             scrollToSelected = true;
+            searchQuery[0] = '\0';
+        }
+
+        // Show "3 of 12" next to the title while a search is active
+        if (searchQuery[0] != '\0') {
+            int titleW = UIWidth("Bugs", 28);   // measured width of the title in the UI font
+            UIText(TextFormat("%d of %d", rowCount, bugCount), 16 + titleW + 12, 26, 16, COL_DIM);
+        }
+
+        // ----- Search box (header row 2) -----
+        Rectangle searchBox = { LIST_MARGIN, 58, LIST_W - 2 * LIST_MARGIN, 38 };
+        TextField(searchBox, "", searchQuery, sizeof(searchQuery), FIELD_SEARCH, false);
+        if (searchQuery[0] == '\0' && activeField != FIELD_SEARCH)
+            UIText("Search bugs...", (int)searchBox.x + 8, (int)searchBox.y + 8, 18, COL_DIM);
+
+        
+        // Clear button: only shown while there is text in the search box
+        if (searchQuery[0] != '\0') {
+            Rectangle clearBtn = { searchBox.x + searchBox.width - 32, searchBox.y + 6, 26, 26 };
+            if (Button(clearBtn, "x", (Color){ 70, 74, 86, 255 })) {
+                searchQuery[0] = '\0';        // empty the string: first byte becomes the terminator
+                activeField = FIELD_SEARCH;   // keep focus in the box so the user can type a new search
+            }
         }
 
         for (int slot = 0; slot < rowCount; slot++) {
-        int i = slot;   // bug index. Search will later map slot -> matching bug index here
+        int i = visible[slot];   // bug index. Search will later map slot -> matching bug index here
             Rectangle row = { LIST_MARGIN, LIST_TOP + slot * ROW_PITCH - listScroll, LIST_W - 2 * LIST_MARGIN, ROW_H };
 
             // Skip rows that are entirely outside the visible list area
@@ -308,6 +368,11 @@ int main(void)
 
             if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { selected = i; activeField = FIELD_NONE; }
         }
+
+        // ----- Empty state -----
+        if (rowCount == 0)
+            UIText(bugCount == 0 ? "No bugs yet. Click + New Bug." : "No bugs match your search.",
+                   LIST_MARGIN + 8, LIST_TOP + 16, 16, COL_DIM);
 
         // ----- Scrollbar (only when the list overflows) -----
         if (maxScroll > 0) {

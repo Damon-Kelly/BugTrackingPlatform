@@ -29,6 +29,13 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 
 target_link_libraries(${PROJECT_NAME} raylib)
 
+
+# Copy fonts next to the executable after every build
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/src/fonts
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>/fonts)
+
 # macOS frameworks (only needed on macOS)
 if(APPLE)
     target_link_libraries(${PROJECT_NAME} "-framework IOKit")
