@@ -220,6 +220,7 @@ int main(void)
     bool  draggingThumb = false;   // true while the user is holding the scrollbar thumb
     float dragOffsetY   = 0.0f;    // where on the thumb we grabbed it (distance from thumb top to the mouse)
     char searchQuery[64] = "";     // what the user has typed in the search box
+    char prevQuery[64]   = "";     // the query from the previous frame, to detect changes
 
     while (!WindowShouldClose())
     {
@@ -235,6 +236,12 @@ int main(void)
         int rowCount = 0;
         for (int k = 0; k < bugCount; k++)
             if (BugMatches(&bugs[k], searchQuery)) visible[rowCount++] = k;
+        
+        // If the search text changed, jump back to the top of the (new) list
+        if (strcmp(searchQuery, prevQuery) != 0) {
+            snprintf(prevQuery, sizeof(prevQuery), "%s", searchQuery);
+            listScroll = 0.0f;
+        }
 
         float contentH  = rowCount * ROW_PITCH;            // total height of all rows
         float maxScroll = contentH - listView.height;      // how far we can scroll
@@ -245,8 +252,13 @@ int main(void)
 
         if (scrollToSelected) {
             scrollToSelected = false;
-            if (selected >= 0 && selected < rowCount) {
-                int slot = selected;   // today slot == bug index; search will change this later
+
+            // Find which on-screen slot shows the selected bug (it may not be visible at all)
+            int slot = -1;
+            for (int k = 0; k < rowCount; k++)
+                if (visible[k] == selected) { slot = k; break; }
+
+            if (slot >= 0) {
                 float rowTop    = slot * ROW_PITCH;
                 float rowBottom = rowTop + ROW_H;
                 if (rowTop < listScroll)
@@ -301,6 +313,13 @@ int main(void)
             selected = bugCount - 1;
             activeField = FIELD_TITLE;
             scrollToSelected = true;
+            searchQuery[0] = '\0';
+        }
+        
+        // Show "3 of 12" next to the title while a search is active
+        if (searchQuery[0] != '\0') {
+            int titleW = UIWidth("Bugs", 28);   // measured width of the title in the UI font
+            UIText(TextFormat("%d of %d", rowCount, bugCount), 16 + titleW + 12, 26, 16, COL_DIM);
         }
 
         // ----- Search box (header row 2) -----
@@ -339,6 +358,11 @@ int main(void)
 
             if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { selected = i; activeField = FIELD_NONE; }
         }
+
+        // ----- Empty state -----
+        if (rowCount == 0)
+            UIText(bugCount == 0 ? "No bugs yet. Click + New Bug." : "No bugs match your search.",
+                   LIST_MARGIN + 8, LIST_TOP + 16, 16, COL_DIM);
 
         // ----- Scrollbar (only when the list overflows) -----
         if (maxScroll > 0) {
