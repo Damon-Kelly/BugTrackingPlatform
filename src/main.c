@@ -3,6 +3,7 @@
 #include "raylib.h"
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
 
 // ---------- Data model ----------
 #define MAX_BUGS 128
@@ -115,6 +116,25 @@ static bool LoadBugs(void)
     return true;
 }
 
+// Case-insensitive substring search: does `needle` appear anywhere inside `hay`?
+static bool ContainsIgnoreCase(const char *hay, const char *needle)
+{
+    if (needle[0] == '\0') return true;          // empty search matches everything
+    for (; *hay; hay++) {                        // try starting the match at each position in hay
+        const char *h = hay, *n = needle;
+        while (*h && *n && tolower((unsigned char)*h) == tolower((unsigned char)*n)) { h++; n++; }
+        if (*n == '\0') return true;             // we consumed the whole needle: it's a match
+    }
+    return false;
+}
+
+// Does this bug match the search text? Today: title or description.
+// Status/priority filters can add conditions here later.
+static bool BugMatches(const Bug *b, const char *query)
+{
+    return ContainsIgnoreCase(b->title, query) || ContainsIgnoreCase(b->description, query);
+}
+
 // Immediate-mode button: draws AND reports a click in one call.
 static bool Button(Rectangle r, const char *label, Color base)
 {
@@ -209,9 +229,12 @@ int main(void)
         // The visible window onto the list. Rows outside this rectangle are scrolled out of view.
         Rectangle listView = { 0, LIST_TOP, LIST_W, GetScreenHeight() - LIST_TOP };
 
-        // How many rows the list is showing. Today that's every bug;
-        // search will later set this to the number of matches instead.
-        int rowCount = bugCount;
+        // Build the list of bugs to show: visible[slot] = index into bugs[].
+        // rowCount = how many rows the list has after filtering by the search text.
+        int visible[MAX_BUGS];
+        int rowCount = 0;
+        for (int k = 0; k < bugCount; k++)
+            if (BugMatches(&bugs[k], searchQuery)) visible[rowCount++] = k;
 
         float contentH  = rowCount * ROW_PITCH;            // total height of all rows
         float maxScroll = contentH - listView.height;      // how far we can scroll
@@ -284,10 +307,10 @@ int main(void)
         Rectangle searchBox = { LIST_MARGIN, 58, LIST_W - 2 * LIST_MARGIN, 38 };
         TextField(searchBox, "", searchQuery, sizeof(searchQuery), FIELD_SEARCH, false);
         if (searchQuery[0] == '\0' && activeField != FIELD_SEARCH)
-            DrawText("Search bugs...", (int)searchBox.x + 8, (int)searchBox.y + 8, 18, COL_DIM);
+            UIText("Search bugs...", (int)searchBox.x + 8, (int)searchBox.y + 8, 18, COL_DIM);
 
         for (int slot = 0; slot < rowCount; slot++) {
-        int i = slot;   // bug index. Search will later map slot -> matching bug index here
+        int i = visible[slot];   // bug index. Search will later map slot -> matching bug index here
             Rectangle row = { LIST_MARGIN, LIST_TOP + slot * ROW_PITCH - listScroll, LIST_W - 2 * LIST_MARGIN, ROW_H };
 
             // Skip rows that are entirely outside the visible list area
