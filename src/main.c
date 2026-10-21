@@ -1,4 +1,4 @@
-// Bug Tracker prototype - slice 1
+// Bug Tracker prototype 
 // Single file, in-memory data, hand-rolled immediate-mode UI.
 #include "raylib.h"
 #include <string.h>
@@ -261,6 +261,12 @@ int main(void)
         int rowCount = 0;
         for (int k = 0; k < bugCount; k++)
             if (BugMatches(&bugs[k], searchQuery, statusOn)) visible[rowCount++] = k;
+    
+        // Is anything narrowing the list? True if there is search text or any status chip is off.
+        bool anyChipOff = false;
+        for (int s = 0; s < STATUS_COUNT; s++)
+            if (!statusOn[s]) anyChipOff = true;
+        bool filtering = (searchQuery[0] != '\0') || anyChipOff;
         
         // If the search text changed, jump back to the top of the (new) list
         if (strcmp(searchQuery, prevQuery) != 0) {
@@ -339,10 +345,11 @@ int main(void)
             activeField = FIELD_TITLE;
             scrollToSelected = true;
             searchQuery[0] = '\0';
+            for (int s = 0; s < STATUS_COUNT; s++) statusOn[s] = true;   // make sure the new Open bug is visible
         }
 
-        // Show "3 of 12" next to the title while a search is active
-        if (searchQuery[0] != '\0') {
+        // Show "3 of 12" next to the title while any filter (search text or status chips) is active
+        if (filtering) {
             int titleW = UIWidth("Bugs", 28);   // measured width of the title in the UI font
             UIText(TextFormat("%d of %d", rowCount, bugCount), 16 + titleW + 12, 26, 16, COL_DIM);
         }
@@ -367,8 +374,10 @@ int main(void)
         float chipW = (LIST_W - 2 * LIST_MARGIN - (STATUS_COUNT - 1) * CHIP_GAP) / (float)STATUS_COUNT;
         for (int s = 0; s < STATUS_COUNT; s++) {
             Rectangle chip = { LIST_MARGIN + s * (chipW + CHIP_GAP), CHIP_Y, chipW, CHIP_H };
-            if (Chip(chip, statusNames[s], statusOn[s], statusColors[s]))
+            if (Chip(chip, statusNames[s], statusOn[s], statusColors[s])) {
                 statusOn[s] = !statusOn[s];
+                listScroll = 0.0f;          // the list changed, so jump back to the top
+            }
         }
 
         for (int slot = 0; slot < rowCount; slot++) {
@@ -404,7 +413,7 @@ int main(void)
 
         // ----- Empty state -----
         if (rowCount == 0)
-            UIText(bugCount == 0 ? "No bugs yet. Click + New Bug." : "No bugs match your search.",
+            UIText(bugCount == 0 ? "No bugs yet. Click + New Bug." : "No bugs match your filters.",
                    LIST_MARGIN + 8, LIST_TOP + 16, 16, COL_DIM);
 
         // ----- Scrollbar (only when the list overflows) -----
