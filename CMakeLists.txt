@@ -29,6 +29,8 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 
 target_link_libraries(${PROJECT_NAME} raylib)
 
+# Turn on compiler warnings for our code only (PRIVATE keeps raylib's own build unaffected)
+target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra)
 
 # Copy fonts next to the executable after every build
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
