@@ -1,4 +1,4 @@
-// Bug Tracker prototype - slice 1
+// Bug Tracker prototype 
 // Single file, in-memory data, hand-rolled immediate-mode UI.
 #include "raylib.h"
 #include <string.h>
@@ -49,6 +49,11 @@ static FieldId activeField = FIELD_NONE;
 #define ROW_H       64                   // height of one row
 #define ROW_GAP     6                    // space between rows
 #define ROW_PITCH   (ROW_H + ROW_GAP)    // distance from one row's top to the next (58)
+
+// Status filter chips (header row 3, under the search box)
+#define CHIP_Y      104                  // top of the chip row (search box ends at y=96)
+#define CHIP_H      32                   // chip height; the row ends at y=136, leaving 12px before LIST_TOP
+#define CHIP_GAP    6                    // space between chips
 
 #define SCROLL_SPEED 40.0f   // pixels moved per mouse-wheel notch
 
@@ -128,10 +133,12 @@ static bool ContainsIgnoreCase(const char *hay, const char *needle)
     return false;
 }
 
-// Does this bug match the search text? Today: title or description.
-// Status/priority filters can add conditions here later.
-static bool BugMatches(const Bug *b, const char *query)
+// Should this bug appear in the list? It must pass BOTH tests:
+//   1. its status chip is switched on, and
+//   2. the search text appears in its title or description.
+static bool BugMatches(const Bug *b, const char *query, const bool *statusOn)
 {
+    if (!statusOn[b->status]) return false;   // status chip is off: hide it straight away
     return ContainsIgnoreCase(b->title, query) || ContainsIgnoreCase(b->description, query);
 }
 
@@ -143,6 +150,23 @@ static bool Button(Rectangle r, const char *label, Color base)
     DrawRectangleRounded(r, 0.2f, 6, c);
     int w = UIWidth(label, 22);
     UIText(label, (int)(r.x + (r.width - w) / 2), (int)(r.y + (r.height - 22) / 2), 22, WHITE);
+    return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
+// Toggle chip: filled with its color when ON, dark and dim when OFF.
+// Like Button, it draws AND returns true on the frame it is clicked. The caller flips the bool.
+static bool Chip(Rectangle r, const char *label, bool on, Color onColor)
+{
+    bool hover = CheckCollisionPointRec(GetMousePosition(), r);
+
+    Color fill = on ? onColor : (Color){ 24, 26, 31, 255 };
+    if (hover) fill = ColorBrightness(fill, 0.15f);
+    DrawRectangleRounded(r, 0.4f, 6, fill);
+    if (!on) DrawRectangleRoundedLinesEx(r, 0.4f, 6, 1.0f, (Color){ 70, 74, 86, 255 });
+
+    int w = UIWidth(label, 16);
+    UIText(label, (int)(r.x + (r.width - w) / 2), (int)(r.y + (r.height - 16) / 2), 16, on ? WHITE : COL_DIM);
+
     return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
@@ -221,6 +245,7 @@ int main(void)
     float dragOffsetY   = 0.0f;    // where on the thumb we grabbed it (distance from thumb top to the mouse)
     char searchQuery[64] = "";     // what the user has typed in the search box
     char prevQuery[64]   = "";     // the query from the previous frame, to detect changes
+    bool statusOn[STATUS_COUNT] = { true, true, true };   // which statuses are shown (all on = no status filtering)
 
     while (!WindowShouldClose())
     {
@@ -231,11 +256,17 @@ int main(void)
         Rectangle listView = { 0, LIST_TOP, LIST_W, GetScreenHeight() - LIST_TOP };
 
         // Build the list of bugs to show: visible[slot] = index into bugs[].
-        // rowCount = how many rows the list has after filtering by the search text.
+        // rowCount = how many rows the list has after filtering by search text and status chips.
         int visible[MAX_BUGS];
         int rowCount = 0;
         for (int k = 0; k < bugCount; k++)
-            if (BugMatches(&bugs[k], searchQuery)) visible[rowCount++] = k;
+            if (BugMatches(&bugs[k], searchQuery, statusOn)) visible[rowCount++] = k;
+    
+        // Is anything narrowing the list? True if there is search text or any status chip is off.
+        bool anyChipOff = false;
+        for (int s = 0; s < STATUS_COUNT; s++)
+            if (!statusOn[s]) anyChipOff = true;
+        bool filtering = (searchQuery[0] != '\0') || anyChipOff;
         
         // If the search text changed, jump back to the top of the (new) list
         if (strcmp(searchQuery, prevQuery) != 0) {
@@ -314,10 +345,11 @@ int main(void)
             activeField = FIELD_TITLE;
             scrollToSelected = true;
             searchQuery[0] = '\0';
+            for (int s = 0; s < STATUS_COUNT; s++) statusOn[s] = true;   // make sure the new Open bug is visible
         }
 
-        // Show "3 of 12" next to the title while a search is active
-        if (searchQuery[0] != '\0') {
+        // Show "3 of 12" next to the title while any filter (search text or status chips) is active
+        if (filtering) {
             int titleW = UIWidth("Bugs", 28);   // measured width of the title in the UI font
             UIText(TextFormat("%d of %d", rowCount, bugCount), 16 + titleW + 12, 26, 16, COL_DIM);
         }
@@ -335,6 +367,16 @@ int main(void)
             if (Button(clearBtn, "x", (Color){ 70, 74, 86, 255 })) {
                 searchQuery[0] = '\0';        // empty the string: first byte becomes the terminator
                 activeField = FIELD_SEARCH;   // keep focus in the box so the user can type a new search
+            }
+        }
+
+        // ----- Status filter chips (header row 3) -----
+        float chipW = (LIST_W - 2 * LIST_MARGIN - (STATUS_COUNT - 1) * CHIP_GAP) / (float)STATUS_COUNT;
+        for (int s = 0; s < STATUS_COUNT; s++) {
+            Rectangle chip = { LIST_MARGIN + s * (chipW + CHIP_GAP), CHIP_Y, chipW, CHIP_H };
+            if (Chip(chip, statusNames[s], statusOn[s], statusColors[s])) {
+                statusOn[s] = !statusOn[s];
+                listScroll = 0.0f;          // the list changed, so jump back to the top
             }
         }
 
@@ -371,7 +413,7 @@ int main(void)
 
         // ----- Empty state -----
         if (rowCount == 0)
-            UIText(bugCount == 0 ? "No bugs yet. Click + New Bug." : "No bugs match your search.",
+            UIText(bugCount == 0 ? "No bugs yet. Click + New Bug." : "No bugs match your filters.",
                    LIST_MARGIN + 8, LIST_TOP + 16, 16, COL_DIM);
 
         // ----- Scrollbar (only when the list overflows) -----
