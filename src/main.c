@@ -1,5 +1,5 @@
-// Bug Tracker prototype 
-// Single file, in-memory data, hand-rolled immediate-mode UI.
+// Bug Tracker prototype - Bugzilla-style home page + detail page
+// Single file, hand-rolled immediate-mode UI.
 #include "raylib.h"
 #include <string.h>
 #include <stdio.h>
@@ -31,6 +31,8 @@ static Color statusColors[STATUS_COUNT]      = { { 220, 80, 80, 255 }, { 230, 17
 static Color prioColors[PRIO_COUNT]          = { { 130, 140, 150, 255 }, { 70, 130, 200, 255 }, { 230, 140, 40, 255 }, { 200, 50, 50, 255 } };
 
 // ---------- UI state ----------
+typedef enum { PAGE_HOME, PAGE_DETAIL } Page;   // which screen is showing
+
 typedef enum { FIELD_NONE, FIELD_TITLE, FIELD_DESC, FIELD_STEPS, FIELD_SEARCH } FieldId;
 static FieldId activeField = FIELD_NONE;
 
@@ -42,20 +44,24 @@ static FieldId activeField = FIELD_NONE;
 #define COL_DIM     (Color){ 140, 146, 160, 255 }
 #define LINE_H      28
 
-// List panel layout
-#define LIST_W      420                  // width of the left panel
-#define LIST_TOP    148                   // y where the first row starts (below the header)
-#define LIST_MARGIN 8                    // gap between panel edge and rows
-#define ROW_H       64                   // height of one row
-#define ROW_GAP     6                    // space between rows
-#define ROW_PITCH   (ROW_H + ROW_GAP)    // distance from one row's top to the next (58)
+// Home page layout
+#define MARGIN_X       24      // left/right page margin
+#define SEARCH_Y       76      // top of the search box
+#define SEARCH_H       40
+#define TABLE_HEAD_Y   152     // top of the column header bar
+#define TABLE_HEAD_H   34
+#define TABLE_TOP      192     // y where the first row starts
+#define ROW_H          44      // height of one table row
+#define ROW_GAP        4       // space between rows
+#define ROW_PITCH      (ROW_H + ROW_GAP)
 
-// Status filter chips (header row 3, under the search box)
-#define CHIP_Y      104                  // top of the chip row (search box ends at y=96)
-#define CHIP_H      32                   // chip height; the row ends at y=136, leaving 12px before LIST_TOP
-#define CHIP_GAP    6                    // space between chips
+// Column x positions, measured from the left edge of a row
+#define COL_ID_X       16
+#define COL_STATUS_X   100
+#define COL_PRIO_X     300
+#define COL_TITLE_X    460
 
-#define SCROLL_SPEED 40.0f   // pixels moved per mouse-wheel notch
+#define SCROLL_SPEED 48.0f   // pixels moved per mouse-wheel notch
 
 #define SCROLLBAR_W        6      // width of the scrollbar track
 #define SCROLLBAR_MIN_THUMB 30.0f // thumb never gets smaller than this
@@ -74,6 +80,7 @@ static int UIWidth(const char *s, int size)
 {
     return (int)MeasureTextEx(uiFont, s, (float)size, FONT_SPACING).x;
 }
+
 static void AddBug(const char *title, const char *desc, const char *steps, Status s, Priority p)
 {
     if (bugCount >= MAX_BUGS) return;
@@ -133,12 +140,10 @@ static bool ContainsIgnoreCase(const char *hay, const char *needle)
     return false;
 }
 
-// Should this bug appear in the list? It must pass BOTH tests:
-//   1. its status chip is switched on, and
-//   2. the search text appears in its title or description.
-static bool BugMatches(const Bug *b, const char *query, const bool *statusOn)
+// Does this bug match the search text? Today: title or description.
+// Status/priority filters can add conditions here later.
+static bool BugMatches(const Bug *b, const char *query)
 {
-    if (!statusOn[b->status]) return false;   // status chip is off: hide it straight away
     return ContainsIgnoreCase(b->title, query) || ContainsIgnoreCase(b->description, query);
 }
 
@@ -150,23 +155,6 @@ static bool Button(Rectangle r, const char *label, Color base)
     DrawRectangleRounded(r, 0.2f, 6, c);
     int w = UIWidth(label, 22);
     UIText(label, (int)(r.x + (r.width - w) / 2), (int)(r.y + (r.height - 22) / 2), 22, WHITE);
-    return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-}
-
-// Toggle chip: filled with its color when ON, dark and dim when OFF.
-// Like Button, it draws AND returns true on the frame it is clicked. The caller flips the bool.
-static bool Chip(Rectangle r, const char *label, bool on, Color onColor)
-{
-    bool hover = CheckCollisionPointRec(GetMousePosition(), r);
-
-    Color fill = on ? onColor : (Color){ 24, 26, 31, 255 };
-    if (hover) fill = ColorBrightness(fill, 0.15f);
-    DrawRectangleRounded(r, 0.4f, 6, fill);
-    if (!on) DrawRectangleRoundedLinesEx(r, 0.4f, 6, 1.0f, (Color){ 70, 74, 86, 255 });
-
-    int w = UIWidth(label, 16);
-    UIText(label, (int)(r.x + (r.width - w) / 2), (int)(r.y + (r.height - 16) / 2), 16, on ? WHITE : COL_DIM);
-
     return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
@@ -237,229 +225,248 @@ int main(void)
                "1. Resize window to 700px wide", STATUS_IN_PROGRESS, PRIO_LOW);
         AddBug("Typo on settings page", "'Prefrences' should be 'Preferences'.",
                "1. Open Settings", STATUS_RESOLVED, PRIO_MEDIUM);
-            }
-    selected = (bugCount > 0) ? 0 : -1;
-    float listScroll = 0.0f;   // how many pixels the list is scrolled down
-    bool scrollToSelected = false;   // set when we want the selected row brought into view
-    bool  draggingThumb = false;   // true while the user is holding the scrollbar thumb
-    float dragOffsetY   = 0.0f;    // where on the thumb we grabbed it (distance from thumb top to the mouse)
-    char searchQuery[64] = "";     // what the user has typed in the search box
-    char prevQuery[64]   = "";     // the query from the previous frame, to detect changes
-    bool statusOn[STATUS_COUNT] = { true, true, true };   // which statuses are shown (all on = no status filtering)
+    }
+    selected = -1;   // the app starts on the home page with nothing opened
+
+    Page  page = PAGE_HOME;
+    float listScroll = 0.0f;         // how many pixels the table is scrolled down
+    bool  scrollToSelected = false;  // set when we want the selected row brought into view
+    bool  draggingThumb = false;     // true while the user is holding the scrollbar thumb
+    float dragOffsetY   = 0.0f;      // where on the thumb we grabbed it (distance from thumb top to the mouse)
+    char  searchQuery[64] = "";      // what the user has typed in the search box
+    char  prevQuery[64]   = "";      // the query from the previous frame, to detect changes
 
     while (!WindowShouldClose())
     {
+        // Page changes are applied at the end of the frame, so the click that
+        // switched pages can't also press a button on the new page.
+        Page nextPage = page;
+
         // Clicking empty space clears focus; fields re-set it if clicked (see TextField).
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) activeField = FIELD_NONE;
 
-        // The visible window onto the list. Rows outside this rectangle are scrolled out of view.
-        Rectangle listView = { 0, LIST_TOP, LIST_W, GetScreenHeight() - LIST_TOP };
-
-        // Build the list of bugs to show: visible[slot] = index into bugs[].
-        // rowCount = how many rows the list has after filtering by search text and status chips.
-        int visible[MAX_BUGS];
-        int rowCount = 0;
-        for (int k = 0; k < bugCount; k++)
-            if (BugMatches(&bugs[k], searchQuery, statusOn)) visible[rowCount++] = k;
-    
-        // Is anything narrowing the list? True if there is search text or any status chip is off.
-        bool anyChipOff = false;
-        for (int s = 0; s < STATUS_COUNT; s++)
-            if (!statusOn[s]) anyChipOff = true;
-        bool filtering = (searchQuery[0] != '\0') || anyChipOff;
-        
-        // If the search text changed, jump back to the top of the (new) list
-        if (strcmp(searchQuery, prevQuery) != 0) {
-            snprintf(prevQuery, sizeof(prevQuery), "%s", searchQuery);
-            listScroll = 0.0f;
-        }
-
-        float contentH  = rowCount * ROW_PITCH;            // total height of all rows
-        float maxScroll = contentH - listView.height;      // how far we can scroll
-        if (maxScroll < 0) maxScroll = 0;                  // everything fits: no scrolling
-
-        if (CheckCollisionPointRec(GetMousePosition(), listView))
-            listScroll -= GetMouseWheelMove() * SCROLL_SPEED;
-
-        if (scrollToSelected) {
-            scrollToSelected = false;
-
-            // Find which on-screen slot shows the selected bug (it may not be visible at all)
-            int slot = -1;
-            for (int k = 0; k < rowCount; k++)
-                if (visible[k] == selected) { slot = k; break; }
-
-            if (slot >= 0) {
-                float rowTop    = slot * ROW_PITCH;
-                float rowBottom = rowTop + ROW_H;
-                if (rowTop < listScroll)
-                    listScroll = rowTop;
-                else if (rowBottom > listScroll + listView.height)
-                    listScroll = rowBottom - listView.height;
-            }
-        }
-
-        if (listScroll < 0) listScroll = 0;
-        if (listScroll > maxScroll) listScroll = maxScroll;
-
-        // ---- Scrollbar geometry and thumb dragging ----
-        Rectangle track = { LIST_W - SCROLLBAR_W - 1, listView.y + 4, SCROLLBAR_W, listView.height - 8 };
-        float thumbH = 0.0f;
-        float thumbY = track.y;
-
-        if (maxScroll > 0) {
-            thumbH = track.height * (listView.height / contentH);
-            if (thumbH < SCROLLBAR_MIN_THUMB) thumbH = SCROLLBAR_MIN_THUMB;
-            float travel = track.height - thumbH;                 // how far the thumb can slide
-            thumbY = track.y + travel * (listScroll / maxScroll);
-
-            Vector2 m = GetMousePosition();
-            Rectangle grab = { track.x - SCROLLBAR_GRAB, thumbY, track.width + 2 * SCROLLBAR_GRAB, thumbH };
-
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(m, grab)) {
-                draggingThumb = true;
-                dragOffsetY = m.y - thumbY;                       // remember where we grabbed
-            }
-            if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) draggingThumb = false;
-
-            if (draggingThumb && travel > 0) {
-                float newThumbY = m.y - dragOffsetY;              // where the thumb should be now
-                listScroll = (newThumbY - track.y) / travel * maxScroll;   // reverse of the thumbY formula
-                if (listScroll < 0) listScroll = 0;
-                if (listScroll > maxScroll) listScroll = maxScroll;
-                thumbY = track.y + travel * (listScroll / maxScroll);      // recompute so we draw the new position
-            }
-        } else {
-            draggingThumb = false;
-        }
+        int W = GetScreenWidth();
+        int H = GetScreenHeight();
 
         BeginDrawing();
         ClearBackground(COL_BG);
 
-        // ----- Left panel: bug list -----
-        DrawRectangle(0, 0, LIST_W, GetScreenHeight(), COL_PANEL);
-        UIText("Bugs", 16, 14, 34, COL_TEXT);
-        if (Button((Rectangle){ LIST_W - 140, 14, 124, 38 }, "+ New Bug", (Color){ 60, 120, 200, 255 })) {
-            AddBug("", "", "", STATUS_OPEN, PRIO_MEDIUM);
-            selected = bugCount - 1;
-            activeField = FIELD_TITLE;
-            scrollToSelected = true;
-            searchQuery[0] = '\0';
-            for (int s = 0; s < STATUS_COUNT; s++) statusOn[s] = true;   // make sure the new Open bug is visible
-        }
+        if (page == PAGE_HOME)
+        {
+            // =====================================================
+            //  HOME PAGE: header, search, results table
+            // =====================================================
+            Rectangle listView = { 0, TABLE_TOP, (float)W, (float)(H - TABLE_TOP) };
 
-        // Show "3 of 12" next to the title while any filter (search text or status chips) is active
-        if (filtering) {
-            int titleW = UIWidth("Bugs", 28);   // measured width of the title in the UI font
-            UIText(TextFormat("%d of %d", rowCount, bugCount), 16 + titleW + 12, 26, 16, COL_DIM);
-        }
+            // Build the list of bugs to show: visible[slot] = index into bugs[].
+            int visible[MAX_BUGS];
+            int rowCount = 0;
+            for (int k = 0; k < bugCount; k++)
+                if (BugMatches(&bugs[k], searchQuery)) visible[rowCount++] = k;
 
-        // ----- Search box (header row 2) -----
-        Rectangle searchBox = { LIST_MARGIN, 58, LIST_W - 2 * LIST_MARGIN, 38 };
-        TextField(searchBox, "", searchQuery, sizeof(searchQuery), FIELD_SEARCH, false);
-        if (searchQuery[0] == '\0' && activeField != FIELD_SEARCH)
-            UIText("Search bugs...", (int)searchBox.x + 8, (int)searchBox.y + 8, 18, COL_DIM);
+            // If the search text changed, jump back to the top of the (new) list
+            if (strcmp(searchQuery, prevQuery) != 0) {
+                snprintf(prevQuery, sizeof(prevQuery), "%s", searchQuery);
+                listScroll = 0.0f;
+            }
 
-        
-        // Clear button: only shown while there is text in the search box
-        if (searchQuery[0] != '\0') {
-            Rectangle clearBtn = { searchBox.x + searchBox.width - 32, searchBox.y + 6, 26, 26 };
-            if (Button(clearBtn, "x", (Color){ 70, 74, 86, 255 })) {
-                searchQuery[0] = '\0';        // empty the string: first byte becomes the terminator
-                activeField = FIELD_SEARCH;   // keep focus in the box so the user can type a new search
+            float contentH  = rowCount * ROW_PITCH;            // total height of all rows
+            float maxScroll = contentH - listView.height;      // how far we can scroll
+            if (maxScroll < 0) maxScroll = 0;                  // everything fits: no scrolling
+
+            if (CheckCollisionPointRec(GetMousePosition(), listView))
+                listScroll -= GetMouseWheelMove() * SCROLL_SPEED;
+
+            if (scrollToSelected) {
+                scrollToSelected = false;
+
+                // Find which on-screen slot shows the selected bug (it may not be visible at all)
+                int slot = -1;
+                for (int k = 0; k < rowCount; k++)
+                    if (visible[k] == selected) { slot = k; break; }
+
+                if (slot >= 0) {
+                    float rowTop    = slot * ROW_PITCH;
+                    float rowBottom = rowTop + ROW_H;
+                    if (rowTop < listScroll)
+                        listScroll = rowTop;
+                    else if (rowBottom > listScroll + listView.height)
+                        listScroll = rowBottom - listView.height;
+                }
+            }
+
+            if (listScroll < 0) listScroll = 0;
+            if (listScroll > maxScroll) listScroll = maxScroll;
+
+            // ---- Scrollbar geometry and thumb dragging ----
+            Rectangle track = { (float)(W - SCROLLBAR_W - 6), listView.y + 4, SCROLLBAR_W, listView.height - 8 };
+            float thumbH = 0.0f;
+            float thumbY = track.y;
+
+            if (maxScroll > 0) {
+                thumbH = track.height * (listView.height / contentH);
+                if (thumbH < SCROLLBAR_MIN_THUMB) thumbH = SCROLLBAR_MIN_THUMB;
+                float travel = track.height - thumbH;                 // how far the thumb can slide
+                thumbY = track.y + travel * (listScroll / maxScroll);
+
+                Vector2 m = GetMousePosition();
+                Rectangle grab = { track.x - SCROLLBAR_GRAB, thumbY, track.width + 2 * SCROLLBAR_GRAB, thumbH };
+
+                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(m, grab)) {
+                    draggingThumb = true;
+                    dragOffsetY = m.y - thumbY;                       // remember where we grabbed
+                }
+                if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) draggingThumb = false;
+
+                if (draggingThumb && travel > 0) {
+                    float newThumbY = m.y - dragOffsetY;              // where the thumb should be now
+                    listScroll = (newThumbY - track.y) / travel * maxScroll;   // reverse of the thumbY formula
+                    if (listScroll < 0) listScroll = 0;
+                    if (listScroll > maxScroll) listScroll = maxScroll;
+                    thumbY = track.y + travel * (listScroll / maxScroll);      // recompute so we draw the new position
+                }
+            } else {
+                draggingThumb = false;
+            }
+
+            // ----- Header: logo placeholder + New Bug button -----
+            UIText("Bug Tracker", MARGIN_X, 14, 38, COL_TEXT);   // the logo goes here later
+            if (Button((Rectangle){ (float)(W - MARGIN_X - 140), 16, 140, 40 }, "+ New Bug", (Color){ 60, 120, 200, 255 })) {
+                if (bugCount < MAX_BUGS) {
+                    AddBug("", "", "", STATUS_OPEN, PRIO_MEDIUM);
+                    selected = bugCount - 1;
+                    searchQuery[0] = '\0';
+                    activeField = FIELD_TITLE;
+                    scrollToSelected = true;    // so the new row is in view when we come back
+                    nextPage = PAGE_DETAIL;
+                }
+            }
+
+            // ----- Search box -----
+            Rectangle searchBox = { MARGIN_X, SEARCH_Y, (float)(W - 2 * MARGIN_X), SEARCH_H };
+            TextField(searchBox, "", searchQuery, sizeof(searchQuery), FIELD_SEARCH, false);
+            if (searchQuery[0] == '\0' && activeField != FIELD_SEARCH)
+                UIText("Search bugs by title or description...", (int)searchBox.x + 8, (int)searchBox.y + 8, 22, COL_DIM);
+
+            // Clear button: only shown while there is text in the search box
+            if (searchQuery[0] != '\0') {
+                Rectangle clearBtn = { searchBox.x + searchBox.width - 36, searchBox.y + 7, 26, 26 };
+                if (Button(clearBtn, "x", (Color){ 70, 74, 86, 255 })) {
+                    searchQuery[0] = '\0';
+                    activeField = FIELD_SEARCH;   // keep focus so the user can type a new search
+                }
+            }
+
+            // ----- Result count -----
+            UIText(TextFormat("Showing %d of %d", rowCount, bugCount), MARGIN_X, SEARCH_Y + SEARCH_H + 8, 18, COL_DIM);
+
+            // ----- Column header bar -----
+            Rectangle head = { MARGIN_X, TABLE_HEAD_Y, (float)(W - 2 * MARGIN_X), TABLE_HEAD_H };
+            DrawRectangleRounded(head, 0.2f, 6, COL_PANEL);
+            UIText("ID",       (int)head.x + COL_ID_X,     (int)head.y + 7, 18, COL_DIM);
+            UIText("Status",   (int)head.x + COL_STATUS_X, (int)head.y + 7, 18, COL_DIM);
+            UIText("Priority", (int)head.x + COL_PRIO_X,   (int)head.y + 7, 18, COL_DIM);
+            UIText("Title",    (int)head.x + COL_TITLE_X,  (int)head.y + 7, 18, COL_DIM);
+
+            // ----- Table rows -----
+            for (int slot = 0; slot < rowCount; slot++) {
+                int i = visible[slot];   // bug index for this row
+                Rectangle row = { MARGIN_X, TABLE_TOP + slot * ROW_PITCH - listScroll, (float)(W - 2 * MARGIN_X), ROW_H };
+
+                // Skip rows that are entirely outside the visible table area
+                if (row.y + row.height < listView.y || row.y > listView.y + listView.height) continue;
+
+                bool hover = CheckCollisionPointRec(GetMousePosition(), row)
+                          && CheckCollisionPointRec(GetMousePosition(), listView)
+                          && !draggingThumb;
+
+                // Everything in this row is clipped to the row AND the table area
+                Rectangle clip = GetCollisionRec(row, listView);
+                BeginScissorMode((int)clip.x, (int)clip.y, (int)clip.width, (int)clip.height);
+
+                DrawRectangleRounded(row, 0.15f, 6, (i == selected) ? COL_ROW_SEL : (hover ? ColorBrightness(COL_ROW, 0.1f) : COL_ROW));
+
+                Color textCol = (bugs[i].status == STATUS_RESOLVED) ? COL_DIM : COL_TEXT;
+                int ty = (int)row.y + 12;
+                UIText(TextFormat("#%d", bugs[i].id), (int)row.x + COL_ID_X, ty, 20, textCol);
+                DrawCircle((int)row.x + COL_STATUS_X + 8, (int)row.y + ROW_H / 2, 7, statusColors[bugs[i].status]);
+                UIText(statusNames[bugs[i].status], (int)row.x + COL_STATUS_X + 24, ty, 20, textCol);
+                UIText(prioNames[bugs[i].priority], (int)row.x + COL_PRIO_X, ty, 20, prioColors[bugs[i].priority]);
+                UIText(bugs[i].title[0] ? bugs[i].title : "(untitled)", (int)row.x + COL_TITLE_X, ty, 20, textCol);
+
+                EndScissorMode();
+
+                // Clicking a row opens that bug's detail page
+                if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                    selected = i;
+                    activeField = FIELD_NONE;
+                    nextPage = PAGE_DETAIL;
+                }
+            }
+
+            // ----- Empty state -----
+            if (rowCount == 0)
+                UIText(bugCount == 0 ? "No bugs yet. Click + New Bug." : "No bugs match your search.",
+                       MARGIN_X + 8, TABLE_TOP + 16, 20, COL_DIM);
+
+            // ----- Scrollbar (only when the table overflows) -----
+            if (maxScroll > 0) {
+                Color thumbCol = (Color){ 110, 118, 140, 255 };
+                if (draggingThumb) thumbCol = ColorBrightness(thumbCol, 0.3f);
+                DrawRectangleRounded(track, 1.0f, 4, (Color){ 24, 26, 31, 255 });
+                DrawRectangleRounded((Rectangle){ track.x, thumbY, track.width, thumbH }, 1.0f, 4, thumbCol);
             }
         }
+        else
+        {
+            // =====================================================
+            //  DETAIL PAGE: edit one bug
+            // =====================================================
+            if (selected < 0 || selected >= bugCount) {
+                nextPage = PAGE_HOME;   // nothing valid to show: go back
+            } else {
+                int px = 40;
+                int pw = W - 2 * px;
+                Bug *b = &bugs[selected];
 
-        // ----- Status filter chips (header row 3) -----
-        float chipW = (LIST_W - 2 * LIST_MARGIN - (STATUS_COUNT - 1) * CHIP_GAP) / (float)STATUS_COUNT;
-        for (int s = 0; s < STATUS_COUNT; s++) {
-            Rectangle chip = { LIST_MARGIN + s * (chipW + CHIP_GAP), CHIP_Y, chipW, CHIP_H };
-            if (Chip(chip, statusNames[s], statusOn[s], statusColors[s])) {
-                statusOn[s] = !statusOn[s];
-                listScroll = 0.0f;          // the list changed, so jump back to the top
+                // Back to the list (button or ESC)
+                if (Button((Rectangle){ (float)px, 16, 120, 40 }, "< Back", (Color){ 70, 74, 86, 255 })
+                    || IsKeyPressed(KEY_ESCAPE)) {
+                    nextPage = PAGE_HOME;
+                    scrollToSelected = true;   // bring this bug's row into view on the home page
+                    activeField = FIELD_NONE;
+                }
+
+                UIText(TextFormat("Bug #%d", b->id), px + 140, 18, 34, COL_TEXT);
+
+                // Status / priority / resolve buttons. Click to cycle.
+                if (Button((Rectangle){ (float)(px + pw - 480), 18, 150, 36 }, statusNames[b->status], statusColors[b->status]))
+                    b->status = (Status)((b->status + 1) % STATUS_COUNT);
+                if (Button((Rectangle){ (float)(px + pw - 320), 18, 150, 36 }, prioNames[b->priority], prioColors[b->priority]))
+                    b->priority = (Priority)((b->priority + 1) % PRIO_COUNT);
+                if (Button((Rectangle){ (float)(px + pw - 160), 18, 160, 36 }, "Mark Resolved", (Color){ 60, 140, 80, 255 }))
+                    b->status = STATUS_RESOLVED;
+
+                // Layout computed from the window height so it fills any size
+                int titleY  = 100, titleH = 44;
+                int labelGap = 50;                                   // room for the label above each box
+                int bottom  = H - 70;                                // leave space for the hint line
+                int areaH   = (bottom - (titleY + titleH) - 2 * labelGap) / 2;
+                int descY   = titleY + titleH + labelGap;
+                int stepsY  = descY + areaH + labelGap;
+
+                TextField((Rectangle){ (float)px, (float)titleY, (float)pw, (float)titleH }, "Title",              b->title,       sizeof(b->title),       FIELD_TITLE, false);
+                TextField((Rectangle){ (float)px, (float)descY,  (float)pw, (float)areaH  }, "Description",        b->description, sizeof(b->description), FIELD_DESC,  true);
+                TextField((Rectangle){ (float)px, (float)stepsY, (float)pw, (float)areaH  }, "Steps to reproduce", b->steps,       sizeof(b->steps),       FIELD_STEPS, true);
+
+                UIText("Click a field to edit. Enter = newline in multi-line fields. ESC = back to list.", px, H - 40, 20, COL_DIM);
             }
-        }
-
-        for (int slot = 0; slot < rowCount; slot++) {
-        int i = visible[slot];   // bug index. Search will later map slot -> matching bug index here
-            Rectangle row = { LIST_MARGIN, LIST_TOP + slot * ROW_PITCH - listScroll, LIST_W - 2 * LIST_MARGIN, ROW_H };
-
-            // Skip rows that are entirely outside the visible list area
-            if (row.y + row.height < listView.y || row.y > listView.y + listView.height) continue;
-
-        bool hover = CheckCollisionPointRec(GetMousePosition(), row)
-                      && CheckCollisionPointRec(GetMousePosition(), listView)
-                      && !draggingThumb;
-
-            // Row background and status dot, clipped to the list area
-            BeginScissorMode((int)listView.x, (int)listView.y, (int)listView.width, (int)listView.height);
-            DrawRectangleRounded(row, 0.15f, 6, (i == selected) ? COL_ROW_SEL : (hover ? ColorBrightness(COL_ROW, 0.1f) : COL_ROW));
-            DrawCircle((int)row.x + 16, (int)row.y + 32, 8, statusColors[bugs[i].status]);
-            EndScissorMode();
-
-            // Text, clipped to the row's text area AND the list area
-            Rectangle textArea = { row.x + 30, row.y, row.width - 38, row.height };
-            Rectangle textClip = GetCollisionRec(textArea, listView);
-            BeginScissorMode((int)textClip.x, (int)textClip.y, (int)textClip.width, (int)textClip.height);
-            const char *t = bugs[i].title[0] ? bugs[i].title : "(untitled)";
-            UIText(t, (int)row.x + 32, (int)row.y + 9, 22,
-                     bugs[i].status == STATUS_RESOLVED ? COL_DIM : COL_TEXT);
-            UIText(TextFormat("#%d  %s", bugs[i].id, prioNames[bugs[i].priority]),
-                     (int)row.x + 32, (int)row.y + 34, 17, prioColors[bugs[i].priority]);
-            EndScissorMode();
-
-            if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { selected = i; activeField = FIELD_NONE; }
-        }
-
-        // ----- Empty state -----
-        if (rowCount == 0)
-            UIText(bugCount == 0 ? "No bugs yet. Click + New Bug." : "No bugs match your filters.",
-                   LIST_MARGIN + 8, LIST_TOP + 16, 16, COL_DIM);
-
-        // ----- Scrollbar (only when the list overflows) -----
-        if (maxScroll > 0) {
-            Color thumbCol = (Color){ 110, 118, 140, 255 };
-            if (draggingThumb) thumbCol = ColorBrightness(thumbCol, 0.3f);
-            DrawRectangleRounded(track, 1.0f, 4, (Color){ 24, 26, 31, 255 });
-            DrawRectangleRounded((Rectangle){ track.x, thumbY, track.width, thumbH }, 1.0f, 4, thumbCol);
-        }
-
-        // ----- Right panel: bug details -----
-        int px = LIST_W + 30;
-        int pw = GetScreenWidth() - px - 30;
-
-        if (selected < 0 || selected >= bugCount) {
-            UIText("Select a bug, or create a new one.", px, 40, 26, COL_DIM);
-        } else {
-            Bug *b = &bugs[selected];
-            UIText(TextFormat("Bug #%d", b->id), px, 18, 34, COL_TEXT);
-
-            // Status / priority / resolve buttons. Click to cycle.
-            if (Button((Rectangle){ px + pw - 480, 18, 150, 36 }, statusNames[b->status], statusColors[b->status]))
-                b->status = (Status)((b->status + 1) % STATUS_COUNT);
-            if (Button((Rectangle){ px + pw - 320, 18, 150, 36 }, prioNames[b->priority], prioColors[b->priority]))
-                b->priority = (Priority)((b->priority + 1) % PRIO_COUNT);
-            if (Button((Rectangle){ px + pw - 160, 18, 160, 36 }, "Mark Resolved", (Color){ 60, 140, 80, 255 }))
-                b->status = STATUS_RESOLVED;
-
-            // Layout computed from the window height so it fills any size
-            int titleY  = 100, titleH = 44;
-            int labelGap = 50;                                   // room for the label above each box
-            int bottom  = GetScreenHeight() - 70;                // leave space for the hint line
-            int areaH   = (bottom - (titleY + titleH) - 2 * labelGap) / 2;
-            int descY   = titleY + titleH + labelGap;
-            int stepsY  = descY + areaH + labelGap;
-
-            TextField((Rectangle){ px, titleY, pw, titleH }, "Title",              b->title,       sizeof(b->title),       FIELD_TITLE, false);
-            TextField((Rectangle){ px, descY,  pw, areaH  }, "Description",        b->description, sizeof(b->description), FIELD_DESC,  true);
-            TextField((Rectangle){ px, stepsY, pw, areaH  }, "Steps to reproduce", b->steps,       sizeof(b->steps),       FIELD_STEPS, true);
-
-            UIText("Click a field to edit. Enter = newline in multi-line fields.", px, GetScreenHeight() - 40, 20, COL_DIM);
         }
 
         EndDrawing();
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) SaveBugs();   // covers button clicks and leaving a field
 
+        page = nextPage;
     }
     SaveBugs();
     UnloadFont(uiFont);
