@@ -5,12 +5,24 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <stdlib.h>
 
 // ---------- Data model ----------
 #define MAX_BUGS 128
+#define NAME_LEN 48   // max length of an account name / reporter name (47 characters + terminator)
 
 typedef enum { STATUS_OPEN, STATUS_IN_PROGRESS, STATUS_RESOLVED, STATUS_COUNT } Status;
 typedef enum { PRIO_LOW, PRIO_MEDIUM, PRIO_HIGH, PRIO_CRITICAL, PRIO_COUNT } Priority;
+
+// The layout of save files from before the "reporter" field existed (only used to load them)
+typedef struct {
+    int      id;
+    char     title[64];
+    char     description[512];
+    char     steps[512];
+    Status   status;
+    Priority priority;
+} BugV1;
 
 typedef struct {
     int      id;
@@ -19,6 +31,7 @@ typedef struct {
     char     steps[512];
     Status   status;
     Priority priority;
+    char     reporter[NAME_LEN];   // name of the account that created the bug ("" = unknown)
 } Bug;
 
 static Bug bugs[MAX_BUGS];
@@ -33,7 +46,6 @@ static Color prioColors[PRIO_COUNT]          = { { 130, 140, 150, 255 }, { 70, 1
 
 // ---------- Accounts (plain text, prototype only) ----------
 #define MAX_USERS  32
-#define NAME_LEN   48            // email or username (max 47 characters)
 #define PASS_LEN   32            // password (max 31 characters)
 #define USERS_FILE "users.txt"   // one account per line: name<TAB>password
 
@@ -56,6 +68,11 @@ typedef enum { PAGE_WELCOME, PAGE_AUTH, PAGE_HOME, PAGE_DETAIL } Page;   // whic
 typedef enum { FIELD_NONE, FIELD_TITLE, FIELD_DESC, FIELD_STEPS, FIELD_SEARCH,
                FIELD_AUTH_NAME, FIELD_AUTH_PASS, FIELD_AUTH_PASS2 } FieldId;
 static FieldId activeField = FIELD_NONE;
+
+// Table sorting: which column the list is sorted by, and in which direction
+typedef enum { SORT_ID, SORT_STATUS, SORT_PRIORITY, SORT_REPORTER, SORT_TITLE, SORT_COUNT } SortCol;
+static SortCol sortCol = SORT_ID;
+static bool    sortAsc = true;
 
 // Options for TextField (combine with |)
 #define TF_MULTILINE 1   // Enter inserts a newline
@@ -96,7 +113,11 @@ static char authMsg[96]         = "";    // error message shown under the form
 #define COL_ID_X       16
 #define COL_STATUS_X   100
 #define COL_PRIO_X     300
-#define COL_TITLE_X    460
+#define COL_REPORTER_X 460
+#define COL_TITLE_X    760
+
+static const int   colX[SORT_COUNT]     = { COL_ID_X, COL_STATUS_X, COL_PRIO_X, COL_REPORTER_X, COL_TITLE_X };
+static const char *colNames[SORT_COUNT] = { "ID", "Status", "Priority", "Reporter", "Title" };
 
 #define SCROLL_SPEED 48.0f   // pixels moved per mouse-wheel notch
 
@@ -125,7 +146,7 @@ static void UITextCentered(const char *s, int cx, int y, int size, Color c)
 }
 
 // ---------- Bug storage ----------
-static void AddBug(const char *title, const char *desc, const char *steps, Status s, Priority p)
+static void AddBug(const char *title, const char *desc, const char *steps, Status s, Priority p, const char *reporter)
 {
     if (bugCount >= MAX_BUGS) return;
     Bug *b = &bugs[bugCount];
@@ -134,13 +155,15 @@ static void AddBug(const char *title, const char *desc, const char *steps, Statu
     strncpy(b->title, title, sizeof(b->title) - 1);
     strncpy(b->description, desc, sizeof(b->description) - 1);
     strncpy(b->steps, steps, sizeof(b->steps) - 1);
+    strncpy(b->reporter, reporter, sizeof(b->reporter) - 1);
     b->status = s;
     b->priority = p;
     bugCount++;
 }
 
 #define SAVE_FILE  "bugs.dat"
-#define SAVE_MAGIC 0x31475542   // marks the file as ours, and which format version
+#define SAVE_MAGIC    0x32475542   // marks the file as ours: format version 2 (has "reporter")
+#define SAVE_MAGIC_V1 0x31475542   // format version 1 (no "reporter"): still loadable
 
 static void SaveBugs(void)
 {
@@ -160,10 +183,27 @@ static bool LoadBugs(void)
     if (!f) return false;
 
     int magic = 0, count = 0, id = 0;
-    bool ok = fread(&magic, sizeof(int), 1, f) == 1 && magic == SAVE_MAGIC
+    bool ok = fread(&magic, sizeof(int), 1, f) == 1
+           && (magic == SAVE_MAGIC || magic == SAVE_MAGIC_V1)
            && fread(&count, sizeof(int), 1, f) == 1 && count >= 0 && count <= MAX_BUGS
-           && fread(&id,    sizeof(int), 1, f) == 1
-           && fread(bugs, sizeof(Bug), count, f) == (size_t)count;
+           && fread(&id,    sizeof(int), 1, f) == 1;
+
+    if (ok && magic == SAVE_MAGIC) {
+        ok = fread(bugs, sizeof(Bug), count, f) == (size_t)count;
+    } else if (ok) {
+        // Older save file (no reporter): read it in the old layout and convert each bug
+        static BugV1 old[MAX_BUGS];
+        ok = fread(old, sizeof(BugV1), count, f) == (size_t)count;
+        for (int k = 0; ok && k < count; k++) {
+            memset(&bugs[k], 0, sizeof(Bug));
+            bugs[k].id = old[k].id;
+            memcpy(bugs[k].title,       old[k].title,       sizeof(old[k].title));
+            memcpy(bugs[k].description, old[k].description, sizeof(old[k].description));
+            memcpy(bugs[k].steps,       old[k].steps,       sizeof(old[k].steps));
+            bugs[k].status   = old[k].status;
+            bugs[k].priority = old[k].priority;
+        }
+    }
     fclose(f);
 
     if (!ok) { bugCount = 0; nextId = 1; return false; }
@@ -268,6 +308,12 @@ static bool SubmitAuth(void)
 }
 
 // ---------- Search ----------
+// What to show as the reporter of a bug
+static const char *ReporterName(const Bug *b)
+{
+    return b->reporter[0] ? b->reporter : "Unknown";
+}
+
 // Case-insensitive substring search: does `needle` appear anywhere inside `hay`?
 static bool ContainsIgnoreCase(const char *hay, const char *needle)
 {
@@ -280,11 +326,67 @@ static bool ContainsIgnoreCase(const char *hay, const char *needle)
     return false;
 }
 
-// Does this bug match the search text? Today: title or description.
+// Does this bug match the search text? Title, description or reporter.
 // Status/priority filters can add conditions here later.
 static bool BugMatches(const Bug *b, const char *query)
 {
-    return ContainsIgnoreCase(b->title, query) || ContainsIgnoreCase(b->description, query);
+    return ContainsIgnoreCase(b->title, query) || ContainsIgnoreCase(b->description, query)
+        || ContainsIgnoreCase(ReporterName(b), query);
+}
+
+// ---------- Sorting ----------
+static int CompareIgnoreCase(const char *a, const char *b)
+{
+    while (*a && *b) {
+        int d = tolower((unsigned char)*a) - tolower((unsigned char)*b);
+        if (d != 0) return d;
+        a++; b++;
+    }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+// qsort comparator for an array of bug INDICES (ints), ordered by sortCol / sortAsc
+static int CompareBugs(const void *pa, const void *pb)
+{
+    const Bug *a = &bugs[*(const int *)pa];
+    const Bug *b = &bugs[*(const int *)pb];
+    int c = 0;
+    switch (sortCol) {
+        case SORT_ID:       c = a->id - b->id; break;
+        case SORT_STATUS:   c = (int)a->status   - (int)b->status;   break;
+        case SORT_PRIORITY: c = (int)a->priority - (int)b->priority; break;
+        case SORT_REPORTER: c = CompareIgnoreCase(ReporterName(a), ReporterName(b)); break;
+        case SORT_TITLE:    c = CompareIgnoreCase(a->title, b->title); break;
+        default: break;
+    }
+    if (!sortAsc) c = -c;
+    if (c == 0) c = a->id - b->id;   // equal values: fall back to ID so the order is predictable
+    return c;
+}
+
+// Copy `s` into `out`, shortened with "..." so it is at most maxW pixels wide
+static const char *FitText(const char *s, int maxW, int size, char *out, int cap)
+{
+    snprintf(out, cap, "%s", s);
+    if (UIWidth(out, size) <= maxW) return out;
+    int len = (int)strlen(out);
+    while (len > 0) {
+        len--;
+        snprintf(out, cap, "%.*s...", len, s);
+        if (UIWidth(out, size) <= maxW) break;
+    }
+    return out;
+}
+
+// Small sort arrow with its top at y, centered on cx. Both winding orders are
+// drawn so it shows up whichever way the triangle faces.
+static void DrawSortArrow(int cx, int y, bool up, Color c)
+{
+    Vector2 a, b, d;
+    if (up) { a = (Vector2){ (float)cx, (float)y };       b = (Vector2){ (float)(cx - 5), (float)(y + 8) }; d = (Vector2){ (float)(cx + 5), (float)(y + 8) }; }
+    else    { a = (Vector2){ (float)(cx - 5), (float)y }; b = (Vector2){ (float)cx, (float)(y + 8) };       d = (Vector2){ (float)(cx + 5), (float)y }; }
+    DrawTriangle(a, b, d, c);
+    DrawTriangle(a, d, b, c);
 }
 
 // ---------- Widgets ----------
@@ -378,11 +480,11 @@ int main(void)
 
     if (!LoadBugs()) {
         AddBug("Crash when saving empty file", "App segfaults if the user hits Save with no content.",
-               "1. Launch app\n2. Press Ctrl+S immediately", STATUS_OPEN, PRIO_CRITICAL);
+               "1. Launch app\n2. Press Ctrl+S immediately", STATUS_OPEN, PRIO_CRITICAL, "");
         AddBug("Button label clipped on small windows", "The 'Submit' label is cut off below 800px width.",
-               "1. Resize window to 700px wide", STATUS_IN_PROGRESS, PRIO_LOW);
+               "1. Resize window to 700px wide", STATUS_IN_PROGRESS, PRIO_LOW, "");
         AddBug("Typo on settings page", "'Prefrences' should be 'Preferences'.",
-               "1. Open Settings", STATUS_RESOLVED, PRIO_MEDIUM);
+               "1. Open Settings", STATUS_RESOLVED, PRIO_MEDIUM, "");
     }
     LoadAccounts();
     selected = -1;   // nothing opened at startup
@@ -516,6 +618,7 @@ int main(void)
             int rowCount = 0;
             for (int k = 0; k < bugCount; k++)
                 if (BugMatches(&bugs[k], searchQuery)) visible[rowCount++] = k;
+            qsort(visible, rowCount, sizeof(int), CompareBugs);   // order by the chosen column
 
             // If the search text changed, jump back to the top of the (new) list
             if (strcmp(searchQuery, prevQuery) != 0) {
@@ -601,7 +704,7 @@ int main(void)
                 Rectangle newBtn = { (float)(rightX - 140), 16, 140, 40 };
                 if (Button(newBtn, "+ New Bug", COL_BTN_BLUE)) {
                     if (bugCount < MAX_BUGS) {
-                        AddBug("", "", "", STATUS_OPEN, PRIO_MEDIUM);
+                        AddBug("", "", "", STATUS_OPEN, PRIO_MEDIUM, currentUser >= 0 ? accounts[currentUser].name : "Guest");
                         selected = bugCount - 1;
                         searchQuery[0] = '\0';
                         activeField = FIELD_TITLE;
@@ -620,7 +723,7 @@ int main(void)
             Rectangle searchBox = { MARGIN_X, SEARCH_Y, (float)(W - 2 * MARGIN_X), SEARCH_H };
             TextField(searchBox, "", searchQuery, sizeof(searchQuery), FIELD_SEARCH, 0);
             if (searchQuery[0] == '\0' && activeField != FIELD_SEARCH)
-                UIText("Search bugs by title or description...", (int)searchBox.x + 8, (int)searchBox.y + 8, 22, COL_DIM);
+                UIText("Search by title, description or reporter...", (int)searchBox.x + 8, (int)searchBox.y + 8, 22, COL_DIM);
 
             // Clear button: only shown while there is text in the search box
             if (searchQuery[0] != '\0') {
@@ -634,13 +737,27 @@ int main(void)
             // ----- Result count -----
             UIText(TextFormat("Showing %d of %d", rowCount, bugCount), MARGIN_X, SEARCH_Y + SEARCH_H + 8, 18, COL_DIM);
 
-            // ----- Column header bar -----
+            // ----- Column header bar (click a column name to sort by it) -----
             Rectangle head = { MARGIN_X, TABLE_HEAD_Y, (float)(W - 2 * MARGIN_X), TABLE_HEAD_H };
             DrawRectangleRounded(head, 0.2f, 6, COL_PANEL);
-            UIText("ID",       (int)head.x + COL_ID_X,     (int)head.y + 7, 18, COL_DIM);
-            UIText("Status",   (int)head.x + COL_STATUS_X, (int)head.y + 7, 18, COL_DIM);
-            UIText("Priority", (int)head.x + COL_PRIO_X,   (int)head.y + 7, 18, COL_DIM);
-            UIText("Title",    (int)head.x + COL_TITLE_X,  (int)head.y + 7, 18, COL_DIM);
+            for (int k = 0; k < SORT_COUNT; k++) {
+                int cellW = ((k + 1 < SORT_COUNT) ? colX[k + 1] : (int)head.width) - colX[k];
+                Rectangle cell = { head.x + colX[k] - 8, head.y, (float)cellW, head.height };
+                bool cellHover = CheckCollisionPointRec(GetMousePosition(), cell) && !draggingThumb;
+                bool isSorted  = ((int)sortCol == k);
+
+                if (cellHover) DrawRectangleRounded(cell, 0.2f, 6, COL_ROW);
+                UIText(colNames[k], (int)head.x + colX[k], (int)head.y + 7, 18,
+                       (isSorted || cellHover) ? COL_TEXT : COL_DIM);
+                if (isSorted)   // arrow up = ascending (A-Z, low-high), down = descending
+                    DrawSortArrow((int)head.x + colX[k] + UIWidth(colNames[k], 18) + 14, (int)head.y + 12, sortAsc, COL_TEXT);
+
+                if (cellHover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                    if (isSorted) sortAsc = !sortAsc;                 // same column again: flip direction
+                    else { sortCol = (SortCol)k; sortAsc = (k != SORT_PRIORITY); }   // priority starts with Critical on top
+                    listScroll = 0.0f;
+                }
+            }
 
             // ----- Table rows -----
             for (int slot = 0; slot < rowCount; slot++) {
@@ -666,7 +783,11 @@ int main(void)
                 DrawCircle((int)row.x + COL_STATUS_X + 8, (int)row.y + ROW_H / 2, 7, statusColors[bugs[i].status]);
                 UIText(statusNames[bugs[i].status], (int)row.x + COL_STATUS_X + 24, ty, 20, textCol);
                 UIText(prioNames[bugs[i].priority], (int)row.x + COL_PRIO_X, ty, 20, prioColors[bugs[i].priority]);
-                UIText(bugs[i].title[0] ? bugs[i].title : "(untitled)", (int)row.x + COL_TITLE_X, ty, 20, textCol);
+                char fit[128];   // long names/titles are shortened with "..." so columns never overlap
+                UIText(FitText(ReporterName(&bugs[i]), COL_TITLE_X - COL_REPORTER_X - 20, 20, fit, sizeof(fit)),
+                       (int)row.x + COL_REPORTER_X, ty, 20, textCol);
+                UIText(FitText(bugs[i].title[0] ? bugs[i].title : "(untitled)", (int)row.width - COL_TITLE_X - 24, 20, fit, sizeof(fit)),
+                       (int)row.x + COL_TITLE_X, ty, 20, textCol);
 
                 EndScissorMode();
 
@@ -714,7 +835,9 @@ int main(void)
                     activeField = FIELD_NONE;
                 }
 
-                UIText(TextFormat("Bug #%d", b->id), px + 140, 18, 34, COL_TEXT);
+                const char *heading = TextFormat("Bug #%d", b->id);
+                UIText(heading, px + 140, 18, 34, COL_TEXT);
+                UIText(TextFormat("Reported by %s", ReporterName(b)), px + 140 + UIWidth(heading, 34) + 24, 28, 20, COL_DIM);
 
                 if (canEdit) {
                     // Status / priority / resolve buttons. Click to cycle.
