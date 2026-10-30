@@ -109,6 +109,12 @@ static char authMsg[96]         = "";    // error message shown under the form
 #define ROW_GAP        4       // space between rows
 #define ROW_PITCH      (ROW_H + ROW_GAP)
 
+// Status filter chips: right-aligned on the "Showing N of M" line
+#define CHIP_Y         120     // top of the chip row (the search box ends at y=116)
+#define CHIP_W         120
+#define CHIP_H         28      // the row ends at y=148, just above the column header bar at y=152
+#define CHIP_GAP       8
+
 // Column x positions, measured from the left edge of a row
 #define COL_ID_X       16
 #define COL_STATUS_X   100
@@ -326,10 +332,12 @@ static bool ContainsIgnoreCase(const char *hay, const char *needle)
     return false;
 }
 
-// Does this bug match the search text? Title, description or reporter.
-// Status/priority filters can add conditions here later.
-static bool BugMatches(const Bug *b, const char *query)
+// Should this bug appear in the list? It must pass BOTH tests:
+//   1. its status chip is switched on, and
+//   2. the search text appears in its title, description or reporter.
+static bool BugMatches(const Bug *b, const char *query, const bool *statusOn)
 {
+    if (!statusOn[b->status]) return false;   // status chip is off: hide it straight away
     return ContainsIgnoreCase(b->title, query) || ContainsIgnoreCase(b->description, query)
         || ContainsIgnoreCase(ReporterName(b), query);
 }
@@ -403,6 +411,23 @@ static bool Button(Rectangle r, const char *label, Color base)
 {
     bool hover = CheckCollisionPointRec(GetMousePosition(), r);
     Badge(r, label, hover ? ColorBrightness(base, 0.2f) : base);
+    return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
+// Toggle chip: filled with its color when ON, dark and dim when OFF.
+// Like Button, it draws AND returns true on the frame it is clicked. The caller flips the bool.
+static bool Chip(Rectangle r, const char *label, bool on, Color onColor)
+{
+    bool hover = CheckCollisionPointRec(GetMousePosition(), r);
+
+    Color fill = on ? onColor : (Color){ 24, 26, 31, 255 };
+    if (hover) fill = ColorBrightness(fill, 0.15f);
+    DrawRectangleRounded(r, 0.4f, 6, fill);
+    if (!on) DrawRectangleRoundedLinesEx(r, 0.4f, 6, 1.0f, (Color){ 70, 74, 86, 255 });
+
+    int w = UIWidth(label, 18);
+    UIText(label, (int)(r.x + (r.width - w) / 2), (int)(r.y + (r.height - 18) / 2), 18, on ? WHITE : COL_DIM);
+
     return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
@@ -496,6 +521,7 @@ int main(void)
     float dragOffsetY   = 0.0f;      // where on the thumb we grabbed it (distance from thumb top to the mouse)
     char  searchQuery[64] = "";      // what the user has typed in the search box
     char  prevQuery[64]   = "";      // the query from the previous frame, to detect changes
+        bool  statusOn[STATUS_COUNT] = { true, true, true };   // which statuses are shown (all on = no status filtering)
 
     while (!WindowShouldClose())
     {
@@ -617,7 +643,7 @@ int main(void)
             int visible[MAX_BUGS];
             int rowCount = 0;
             for (int k = 0; k < bugCount; k++)
-                if (BugMatches(&bugs[k], searchQuery)) visible[rowCount++] = k;
+                if (BugMatches(&bugs[k], searchQuery, statusOn)) visible[rowCount++] = k;
             qsort(visible, rowCount, sizeof(int), CompareBugs);   // order by the chosen column
 
             // If the search text changed, jump back to the top of the (new) list
@@ -707,6 +733,7 @@ int main(void)
                         AddBug("", "", "", STATUS_OPEN, PRIO_MEDIUM, currentUser >= 0 ? accounts[currentUser].name : "Guest");
                         selected = bugCount - 1;
                         searchQuery[0] = '\0';
+                                                for (int s = 0; s < STATUS_COUNT; s++) statusOn[s] = true;   // new bugs start Open, so don't let a chip hide them
                         activeField = FIELD_TITLE;
                         scrollToSelected = true;    // so the new row is in view when we come back
                         nextPage = PAGE_DETAIL;
@@ -736,6 +763,17 @@ int main(void)
 
             // ----- Result count -----
             UIText(TextFormat("Showing %d of %d", rowCount, bugCount), MARGIN_X, SEARCH_Y + SEARCH_H + 8, 18, COL_DIM);
+
+
+            // ----- Status filter chips (right-aligned on the same line) -----
+            float chipsX = (float)(W - MARGIN_X - STATUS_COUNT * CHIP_W - (STATUS_COUNT - 1) * CHIP_GAP);
+            for (int s = 0; s < STATUS_COUNT; s++) {
+                Rectangle chip = { chipsX + s * (CHIP_W + CHIP_GAP), CHIP_Y, CHIP_W, CHIP_H };
+                if (Chip(chip, statusNames[s], statusOn[s], statusColors[s])) {
+                    statusOn[s] = !statusOn[s];
+                    listScroll = 0.0f;          // the list changed, so jump back to the top
+                }
+            }
 
             // ----- Column header bar (click a column name to sort by it) -----
             Rectangle head = { MARGIN_X, TABLE_HEAD_Y, (float)(W - 2 * MARGIN_X), TABLE_HEAD_H };
@@ -801,7 +839,7 @@ int main(void)
 
             // ----- Empty state -----
             if (rowCount == 0) {
-                const char *msg = (bugCount > 0)  ? "No bugs match your search."
+                const char *msg = (bugCount > 0)  ? "No bugs match your filters."
                                 : canEdit         ? "No bugs yet. Click + New Bug."
                                                   : "No bugs yet. Sign in to create one.";
                 UIText(msg, MARGIN_X + 8, TABLE_TOP + 16, 20, COL_DIM);
