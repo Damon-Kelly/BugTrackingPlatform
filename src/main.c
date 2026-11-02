@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include <time.h>
 
 // ---------- Data model ----------
 #define MAX_BUGS 128
@@ -13,6 +14,20 @@
 
 typedef enum { STATUS_OPEN, STATUS_IN_PROGRESS, STATUS_RESOLVED, STATUS_COUNT } Status;
 typedef enum { PRIO_LOW, PRIO_MEDIUM, PRIO_HIGH, PRIO_CRITICAL, PRIO_COUNT } Priority;
+// Why a bug was resolved (RES_NONE while it is still open)
+typedef enum { RES_NONE, RES_FIXED, RES_WONT_FIX, RES_DUPLICATE, RES_INVALID, RES_WORKS_FOR_ME, RES_COUNT } Resolution;
+
+// One entry in a bug's activity log: comments now, automatic change records later
+#define MAX_ACTIVITY  32
+#define ACTIVITY_TEXT 256
+typedef enum { ACT_CREATED, ACT_COMMENT, ACT_STATUS, ACT_PRIORITY, ACT_ASSIGNED, ACT_RESOLUTION } ActivityType;
+
+typedef struct {
+    ActivityType type;
+    char         user[NAME_LEN];        // who did it
+    time_t       time;                  // when
+    char         text[ACTIVITY_TEXT];   // the comment, or a description of the change
+} Activity;
 
 // The layout of save files from before the "reporter" field existed (only used to load them)
 typedef struct {
@@ -24,6 +39,17 @@ typedef struct {
     Priority priority;
 } BugV1;
 
+// The layout of save files from the "reporter" version (only used to load them)
+typedef struct {
+    int      id;
+    char     title[64];
+    char     description[512];
+    char     steps[512];
+    Status   status;
+    Priority priority;
+    char     reporter[NAME_LEN];
+} BugV2;
+
 typedef struct {
     int      id;
     char     title[64];
@@ -32,6 +58,14 @@ typedef struct {
     Status   status;
     Priority priority;
     char     reporter[NAME_LEN];   // name of the account that created the bug ("" = unknown)
+
+    // ---- added in save format version 3 ----
+    time_t     created;                // 0 = unknown (bug came from an older save file)
+    time_t     updated;
+    char       assignee[NAME_LEN];     // account name, "" = unassigned
+    Resolution resolution;             // RES_NONE until the bug is resolved
+    int        activityCount;          // how many entries of activity[] are in use
+    Activity   activity[MAX_ACTIVITY];
 } Bug;
 
 static Bug bugs[MAX_BUGS];
@@ -43,6 +77,7 @@ static const char *statusNames[STATUS_COUNT] = { "Open", "In Progress", "Resolve
 static const char *prioNames[PRIO_COUNT]     = { "Low", "Medium", "High", "Critical" };
 static Color statusColors[STATUS_COUNT]      = { { 220, 80, 80, 255 }, { 230, 170, 40, 255 }, { 80, 180, 100, 255 } };
 static Color prioColors[PRIO_COUNT]          = { { 130, 140, 150, 255 }, { 70, 130, 200, 255 }, { 230, 140, 40, 255 }, { 200, 50, 50, 255 } };
+static const char *resolutionNames[RES_COUNT] = { "None", "Fixed", "Won't Fix", "Duplicate", "Invalid", "Works For Me" };
 
 // ---------- Accounts (plain text, prototype only) ----------
 #define MAX_USERS  32
@@ -151,7 +186,31 @@ static void UITextCentered(const char *s, int cx, int y, int size, Color c)
     UIText(s, cx - UIWidth(s, size) / 2, y, size, c);
 }
 
-// ---------- Bug storage ----------
+// Write a time as "2026-10-30 14:05" into `out`. A time of 0 means "unknown".
+static void FormatTime(time_t t, char *out, int cap)
+{
+    struct tm *tmv = (t != 0) ? localtime(&t) : NULL;
+    if (!tmv) { snprintf(out, cap, "Unknown"); return; }
+    strftime(out, cap, "%Y-%m-%d %H:%M", tmv);
+}
+
+// Record something that happened to a bug, and mark the bug as updated.
+// If the log is full, the oldest entry is dropped to make room.
+static void LogActivity(Bug *b, ActivityType type, const char *user, const char *text)
+{
+    if (b->activityCount >= MAX_ACTIVITY) {
+        memmove(&b->activity[0], &b->activity[1], sizeof(Activity) * (MAX_ACTIVITY - 1));
+        b->activityCount = MAX_ACTIVITY - 1;
+    }
+    Activity *a = &b->activity[b->activityCount++];
+    memset(a, 0, sizeof(Activity));
+    a->type = type;
+    a->time = time(NULL);
+    snprintf(a->user, NAME_LEN, "%s", user);
+    snprintf(a->text, ACTIVITY_TEXT, "%s", text);
+    b->updated = a->time;
+}
+
 static void AddBug(const char *title, const char *desc, const char *steps, Status s, Priority p, const char *reporter)
 {
     if (bugCount >= MAX_BUGS) return;
@@ -164,11 +223,14 @@ static void AddBug(const char *title, const char *desc, const char *steps, Statu
     strncpy(b->reporter, reporter, sizeof(b->reporter) - 1);
     b->status = s;
     b->priority = p;
+    b->created = time(NULL);
+    LogActivity(b, ACT_CREATED, b->reporter[0] ? b->reporter : "Unknown", "Bug created");
     bugCount++;
 }
 
 #define SAVE_FILE  "bugs.dat"
-#define SAVE_MAGIC    0x32475542   // marks the file as ours: format version 2 (has "reporter")
+#define SAVE_MAGIC    0x33475542   // marks the file as ours: format version 3 (dates, assignee, resolution, activity log)
+#define SAVE_MAGIC_V2 0x32475542   // format version 2 (has "reporter"): still loadable
 #define SAVE_MAGIC_V1 0x31475542   // format version 1 (no "reporter"): still loadable
 
 static void SaveBugs(void)
@@ -190,14 +252,24 @@ static bool LoadBugs(void)
 
     int magic = 0, count = 0, id = 0;
     bool ok = fread(&magic, sizeof(int), 1, f) == 1
-           && (magic == SAVE_MAGIC || magic == SAVE_MAGIC_V1)
+           && (magic == SAVE_MAGIC || magic == SAVE_MAGIC_V2 || magic == SAVE_MAGIC_V1)
            && fread(&count, sizeof(int), 1, f) == 1 && count >= 0 && count <= MAX_BUGS
            && fread(&id,    sizeof(int), 1, f) == 1;
 
     if (ok && magic == SAVE_MAGIC) {
         ok = fread(bugs, sizeof(Bug), count, f) == (size_t)count;
+    } else if (ok && magic == SAVE_MAGIC_V2) {
+        // Version 2 file: read it in the old layout, then copy each bug into the new one.
+        // The new fields come AFTER the old ones, so the old bytes fit at the start of a Bug;
+        // the rest stays zero (unknown dates, no assignee, no resolution, empty log).
+        static BugV2 old[MAX_BUGS];
+        ok = fread(old, sizeof(BugV2), count, f) == (size_t)count;
+        for (int k = 0; ok && k < count; k++) {
+            memset(&bugs[k], 0, sizeof(Bug));
+            memcpy(&bugs[k], &old[k], sizeof(BugV2));
+        }
     } else if (ok) {
-        // Older save file (no reporter): read it in the old layout and convert each bug
+        // Version 1 file (no reporter): same idea, field by field
         static BugV1 old[MAX_BUGS];
         ok = fread(old, sizeof(BugV1), count, f) == (size_t)count;
         for (int k = 0; ok && k < count; k++) {
@@ -906,6 +978,16 @@ int main(void)
                 UIText(canEdit ? "Click a field to edit. Enter = newline in multi-line fields. ESC = back to list."
                                : "Read-only: sign in to edit bugs. ESC = back to list.",
                        px, H - 40, 20, COL_DIM);
+                
+                // TEMPORARY: shows the new fields so we can check them. Gets a proper place in the next PR.
+                char createdStr[32], updatedStr[32];
+                FormatTime(b->created, createdStr, sizeof(createdStr));
+                FormatTime(b->updated, updatedStr, sizeof(updatedStr));
+                const char *meta = TextFormat("Created %s   Updated %s   Assignee: %s   Resolution: %s   Log: %d",
+                                              createdStr, updatedStr,
+                                              b->assignee[0] ? b->assignee : "none",
+                                              resolutionNames[b->resolution], b->activityCount);
+                UIText(meta, W - px - UIWidth(meta, 18), H - 38, 18, COL_DIM);
             }
         }
 
