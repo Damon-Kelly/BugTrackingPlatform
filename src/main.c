@@ -101,7 +101,7 @@ static int currentUser  = -1;    // index into accounts[], -1 = guest
 typedef enum { PAGE_WELCOME, PAGE_AUTH, PAGE_HOME, PAGE_DETAIL } Page;   // which screen is showing
 
 typedef enum { FIELD_NONE, FIELD_TITLE, FIELD_DESC, FIELD_STEPS, FIELD_SEARCH,
-               FIELD_AUTH_NAME, FIELD_AUTH_PASS, FIELD_AUTH_PASS2 } FieldId;
+               FIELD_AUTH_NAME, FIELD_AUTH_PASS, FIELD_AUTH_PASS2, FIELD_COUNT } FieldId;
 static FieldId activeField = FIELD_NONE;
 
 // Table sorting: which column the list is sorted by, and in which direction
@@ -563,7 +563,170 @@ static bool Chip(Rectangle r, const char *label, bool on, Color onColor)
     return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
-// Text field. Edits `buf` in place when it is the active field. `flags` = TF_* options.
+// ---------- Text field internals ----------
+// A focused text field has a caret (the cursor). Only one field has focus at a time, so the caret
+// is shared. Multi-line fields also remember how far they are scrolled (one value per field).
+#define TF_FONT      22                  // text size inside fields
+#define TF_PAD       8                   // space between a field's border and its text
+#define TF_BAR_W     14                  // strip kept free on the right of multi-line fields for the scrollbar
+#define TF_MAX_TEXT  512                 // longest text any field holds (description, steps)
+#define TF_MAX_LINES (TF_MAX_TEXT + 1)   // worst case: every character is a newline
+
+typedef struct { int start, len; } TextLine;   // one line as drawn: a slice of the text
+
+typedef struct {
+    char     shown[TF_MAX_TEXT + 1];    // the text as drawn (stars for passwords)
+    float    step[TF_MAX_TEXT + 1];     // how far the pen moves right after each character
+    TextLine lines[TF_MAX_LINES];       // the text split into drawn lines
+    int      count;                     // number of lines (at least 1)
+    int      len;                       // length of the text
+} TextLayout;
+
+static int         caret         = 0;             // caret position in the focused field (0 = before the first character)
+static FieldId     caretField    = FIELD_NONE;    // which field `caret` belongs to
+static double      caretStamp    = 0.0;           // time of the last caret move or edit (the caret blinks from then)
+static float       fieldScroll[FIELD_COUNT];      // pixels each multi-line field is scrolled down
+static const char *scrollOwner[FIELD_COUNT];      // which text each field's scroll belongs to
+static FieldId     barDragField  = FIELD_NONE;    // field whose scrollbar thumb is being dragged
+static float       barDragOffset = 0.0f;          // where on the thumb it was grabbed
+
+// True on the frame a key goes down, and again while it is held (auto-repeat)
+static bool KeyRepeats(int key)
+{
+    return IsKeyPressed(key) || IsKeyPressedRepeat(key);
+}
+
+// Split `s` (n characters) into lines. A line ends at '\n' or, when wrapMax > 0, where the next word
+// would no longer fit in wrapMax pixels (a word longer than a whole line is cut). Returns the line count.
+static int LayoutLines(const char *s, int n, const float *step, float wrapMax, TextLine *lines)
+{
+    int count = 0;
+    int start = 0;
+    for (;;) {
+        int end = start;                                   // this paragraph is s[start..end)
+        while (end < n && s[end] != '\n') end++;
+
+        int a = start;
+        do {
+            int b = end;
+            if (wrapMax > 0) {
+                float w = 0;
+                int lastSpace = -1;
+                b = a;
+                while (b < end && (b == a || w + step[b] <= wrapMax)) {   // always take at least one character
+                    if (s[b] == ' ') lastSpace = b;
+                    w += step[b];
+                    b++;
+                }
+                if (b < end) {                                  // the rest did not fit: choose where to break
+                    if (s[b] == ' ') b++;                       // a space may hang over the edge
+                    else if (lastSpace >= 0) b = lastSpace + 1; // otherwise break after the last space
+                }
+            }
+            if (count < TF_MAX_LINES) { lines[count].start = a; lines[count].len = b - a; count++; }
+            a = b;
+        } while (a < end);
+
+        if (end >= n) break;
+        start = end + 1;                                   // skip the '\n'
+    }
+    return count;
+}
+
+// Measure and split a field's text. wrapMax = 0 means "never wrap".
+static void BuildLayout(TextLayout *L, const char *buf, bool masked, float wrapMax)
+{
+    int n = (int)strlen(buf);
+    if (n > TF_MAX_TEXT) n = TF_MAX_TEXT;
+    for (int i = 0; i < n; i++) {
+        char c = (masked && buf[i] != '\n') ? '*' : buf[i];
+        char one[2] = { c, '\0' };
+        L->shown[i] = c;
+        // DrawTextEx moves the pen by (glyph advance + spacing) per character, so this matches what is drawn
+        L->step[i] = (c == '\n') ? 0.0f : MeasureTextEx(uiFont, one, (float)TF_FONT, 0).x + FONT_SPACING;
+    }
+    L->shown[n] = '\0';
+    L->len = n;
+    L->count = LayoutLines(L->shown, n, L->step, wrapMax, L->lines);
+}
+
+// Which line a caret position is shown on. The position where one wrapped line ends and the next begins
+// counts as the start of the next line.
+static int LineOfCaret(const TextLayout *L, int pos)
+{
+    int li = 0;
+    for (int i = 0; i < L->count; i++)
+        if (L->lines[i].start <= pos) li = i;
+    return li;
+}
+
+// Horizontal distance from the start of line `li` to caret position `pos`
+static float CaretX(const TextLayout *L, int li, int pos)
+{
+    float x = 0;
+    for (int k = L->lines[li].start; k < pos && k < L->len; k++) x += L->step[k];
+    return x;
+}
+
+// Last caret position that belongs to line `li`. A wrapped line stops one short, because
+// the position right after it is already the start of the next line.
+static int LineEnd(const TextLayout *L, int li)
+{
+    int e = L->lines[li].start + L->lines[li].len;
+    if (e < L->len && L->shown[e] != '\n') e--;
+    return e;
+}
+
+// Caret position on line `li` closest to the horizontal offset x (measured from the start of the line)
+static int CaretFromX(const TextLayout *L, int li, float x)
+{
+    int last = LineEnd(L, li);
+    float cx = 0;
+    for (int k = L->lines[li].start; k < last; k++) {
+        if (x < cx + L->step[k] * 0.5f) return k;   // left half of a character: put the caret before it
+        cx += L->step[k];
+    }
+    return last;
+}
+
+// How far a single-line field's text is shifted left so that the caret stays inside the box
+static float SingleLineOffset(const TextLayout *L, int pos, float boxW)
+{
+    float cx = CaretX(L, LineOfCaret(L, pos), pos);
+    float room = boxW - 2 * TF_PAD - 2;
+    return (cx > room) ? cx - room : 0.0f;
+}
+
+// Insert one character at *pos and move *pos past it. False if the field is full.
+static bool FieldInsertChar(char *buf, int cap, int *pos, char c)
+{
+    int len = (int)strlen(buf);
+    if (len >= cap - 1) return false;
+    memmove(buf + *pos + 1, buf + *pos, (size_t)(len - *pos + 1));   // shift the tail (and the '\0') right
+    buf[*pos] = c;
+    (*pos)++;
+    return true;
+}
+
+// Delete the character at position pos
+static void FieldRemoveChar(char *buf, int pos)
+{
+    memmove(buf + pos, buf + pos + 1, strlen(buf + pos));            // shift the tail (and the '\0') left
+}
+
+// Height and top y of the scrollbar thumb of a multi-line field, for a given scroll position
+static void FieldThumb(Rectangle track, float viewH, float contentH, float scroll, float maxScroll,
+                       float *thumbH, float *thumbY)
+{
+    *thumbH = track.height * (viewH / contentH);
+    if (*thumbH < SCROLLBAR_MIN_THUMB) *thumbH = SCROLLBAR_MIN_THUMB;
+    *thumbY = track.y + (track.height - *thumbH) * (scroll / maxScroll);
+}
+
+// Text field. Edits `buf` in place when it has focus. `flags` = TF_* options.
+// Click to put the caret anywhere; arrows, Home, End, Backspace and Delete edit at the caret.
+// Multi-line fields wrap long lines and scroll (mouse wheel, scrollbar, or by moving the caret).
+// Returns true on a frame in which the text changed.
 static bool TextField(Rectangle r, const char *label, char *buf, int cap, FieldId id, int flags)
 {
     bool multiline = (flags & TF_MULTILINE) != 0;
@@ -572,59 +735,154 @@ static bool TextField(Rectangle r, const char *label, char *buf, int cap, FieldI
 
     UIText(label, (int)r.x, (int)r.y - 20, 20, COL_DIM);
 
-    if (!readonly && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), r))
-        activeField = id;
+    Vector2 mouse   = GetMousePosition();
+    bool    hover   = CheckCollisionPointRec(mouse, r);
+    bool    pressed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 
-    bool active = !readonly && (activeField == id);
-    bool changed = false;   // did the text change this frame?
+    float     wrapMax = multiline ? r.width - 2 * TF_PAD - TF_BAR_W : 0.0f;   // 0 = never wrap
+    float     viewH   = r.height - 2 * TF_PAD;                                // height available for text
+    Rectangle track   = { r.x + r.width - 11, r.y + 6, SCROLLBAR_W, r.height - 12 };
 
-    if (active) {
-        int len = (int)strlen(buf);
-        int ch;
-        while ((ch = GetCharPressed()) > 0) {                 // typed characters this frame
-            if (ch >= 32 && ch <= 126 && len < cap - 1) { buf[len++] = (char)ch; buf[len] = '\0'; changed = true; }
+    // A different text than last frame (another bug was opened): start at the top again
+    if (scrollOwner[id] != buf) { scrollOwner[id] = buf; fieldScroll[id] = 0.0f; }
+
+    TextLayout L;
+    BuildLayout(&L, buf, masked, wrapMax);
+
+    float contentH  = L.count * (float)LINE_H;
+    float maxScroll = (multiline && contentH > viewH) ? contentH - viewH : 0.0f;
+
+    // Mouse wheel over the field (works for read-only fields too, so guests can read long text)
+    if (maxScroll > 0 && hover) fieldScroll[id] -= GetMouseWheelMove() * LINE_H * 2;
+
+    // Pressing the scrollbar thumb starts a drag
+    bool onThumb = false;
+    if (maxScroll > 0) {
+        float thumbH, thumbY;
+        FieldThumb(track, viewH, contentH, fieldScroll[id], maxScroll, &thumbH, &thumbY);
+        Rectangle grab = { track.x - SCROLLBAR_GRAB, thumbY, track.width + 2 * SCROLLBAR_GRAB, thumbH };
+        if (pressed && CheckCollisionPointRec(mouse, grab)) {
+            barDragField  = id;
+            barDragOffset = mouse.y - thumbY;
+            onThumb = true;
         }
-        if ((IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE)) && len > 0) {
-            buf[--len] = '\0';
-            changed = true;
-        }
-        if (multiline && IsKeyPressed(KEY_ENTER) && len < cap - 1) { buf[len++] = '\n'; buf[len] = '\0'; changed = true; }
     }
 
+    // Clicking in the field gives it focus and puts the caret where the click landed
+    bool clicked = false;
+    if (!readonly && pressed && hover) {
+        activeField = id;
+        if (!onThumb) {
+            float offX = 0.0f;   // a single-line field may be shifted left; use the shift it was drawn with
+            if (!multiline && caretField == id) offX = SingleLineOffset(&L, caret < L.len ? caret : L.len, r.width);
+            int li = (int)((mouse.y - (r.y + TF_PAD) + (multiline ? fieldScroll[id] : 0.0f)) / LINE_H);
+            if (li < 0) li = 0;
+            if (li > L.count - 1) li = L.count - 1;
+            caret = CaretFromX(&L, li, mouse.x - (r.x + TF_PAD) + offX);
+            caretField = id;
+            clicked = true;
+        }
+    }
+
+    bool active  = !readonly && (activeField == id);
+    bool changed = false;
+    bool moved   = clicked;
+
+    if (!active) {
+        if (caretField == id) caretField = FIELD_NONE;           // lost focus: forget the caret
+    } else {
+        if (caretField != id) { caretField = id; caret = L.len; moved = true; }   // focused by code (Tab, New Bug): caret at the end
+        if (caret > L.len) caret = L.len;                        // the text got shorter behind our back (e.g. search cleared)
+
+        // ----- Typing and deleting happen at the caret -----
+        int ch;
+        while ((ch = GetCharPressed()) > 0)                      // typed characters this frame
+            if (ch >= 32 && ch <= 126 && FieldInsertChar(buf, cap, &caret, (char)ch)) changed = true;
+        if (multiline && IsKeyPressed(KEY_ENTER) && FieldInsertChar(buf, cap, &caret, '\n')) changed = true;
+        if (KeyRepeats(KEY_BACKSPACE) && caret > 0) { caret--; FieldRemoveChar(buf, caret); changed = true; }
+        if (KeyRepeats(KEY_DELETE) && caret < (int)strlen(buf)) { FieldRemoveChar(buf, caret); changed = true; }
+        if (changed) BuildLayout(&L, buf, masked, wrapMax);      // the text moved: measure it again
+
+        // ----- Moving the caret -----
+        int li = LineOfCaret(&L, caret);
+        if (KeyRepeats(KEY_LEFT)  && caret > 0)     { caret--; moved = true; }
+        if (KeyRepeats(KEY_RIGHT) && caret < L.len) { caret++; moved = true; }
+        if (IsKeyPressed(KEY_HOME)) { caret = L.lines[li].start; moved = true; }
+        if (IsKeyPressed(KEY_END))  { caret = LineEnd(&L, li);   moved = true; }
+        if (multiline && KeyRepeats(KEY_UP) && li > 0) {
+            caret = CaretFromX(&L, li - 1, CaretX(&L, li, caret));
+            moved = true;
+        }
+        if (multiline && KeyRepeats(KEY_DOWN) && li < L.count - 1) {
+            caret = CaretFromX(&L, li + 1, CaretX(&L, li, caret));
+            moved = true;
+        }
+        if (changed || moved) caretStamp = GetTime();
+    }
+
+    // ----- Scrolling: keep the caret in view, follow the scrollbar thumb, stay within range -----
+    contentH  = L.count * (float)LINE_H;
+    maxScroll = (multiline && contentH > viewH) ? contentH - viewH : 0.0f;
+
+    if (multiline && active && (moved || changed)) {
+        float top    = LineOfCaret(&L, caret) * (float)LINE_H;
+        float bottom = top + LINE_H;
+        if (top < fieldScroll[id])                   fieldScroll[id] = top;
+        else if (bottom > fieldScroll[id] + viewH)   fieldScroll[id] = bottom - viewH;
+    }
+
+    if (barDragField == id) {
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || maxScroll <= 0) {
+            barDragField = FIELD_NONE;
+        } else {
+            float thumbH, thumbY;
+            FieldThumb(track, viewH, contentH, fieldScroll[id], maxScroll, &thumbH, &thumbY);
+            float travel = track.height - thumbH;
+            if (travel > 0) fieldScroll[id] = (mouse.y - barDragOffset - track.y) / travel * maxScroll;
+        }
+    }
+    if (fieldScroll[id] > maxScroll) fieldScroll[id] = maxScroll;
+    if (fieldScroll[id] < 0)         fieldScroll[id] = 0;
+
+    // ----- Drawing -----
     DrawRectangleRec(r, (Color){ 24, 26, 31, 255 });
     DrawRectangleLinesEx(r, 2, active ? (Color){ 90, 140, 230, 255 } : (Color){ 70, 74, 86, 255 });
+
+    float scrollY = multiline ? fieldScroll[id] : 0.0f;
+    float offX    = (!multiline && active) ? SingleLineOffset(&L, caret, r.width) : 0.0f;
+    int   originX = (int)(r.x + TF_PAD - offX);
 
     // Clip drawing to the box so long text can't spill out.
     BeginScissorMode((int)r.x + 2, (int)r.y + 2, (int)r.width - 4, (int)r.height - 4);
     {
-        int y = (int)r.y + 8;
-        char shown[256];
-        const char *p = buf;
-        if (masked) {                                          // show *** instead of the real text
-            int n = (int)strlen(buf);
-            if (n > 255) n = 255;
-            memset(shown, '*', n);
-            shown[n] = '\0';
-            p = shown;
+        char line[TF_MAX_TEXT + 1];
+        for (int i = 0; i < L.count; i++) {
+            float y = r.y + TF_PAD - scrollY + i * (float)LINE_H;
+            if (y + LINE_H < r.y || y > r.y + r.height) continue;       // scrolled out of view: skip it
+            memcpy(line, L.shown + L.lines[i].start, (size_t)L.lines[i].len);
+            line[L.lines[i].len] = '\0';
+            UIText(line, originX, (int)y, TF_FONT, COL_TEXT);
         }
-        char line[256];
-        while (1) {
-            const char *nl = strchr(p, '\n');
-            int n = nl ? (int)(nl - p) : (int)strlen(p);
-            if (n > 255) n = 255;
-            memcpy(line, p, n);
-            line[n] = '\0';
-            UIText(line, (int)r.x + 8, y, 22, COL_TEXT);
-            if (!nl) {   // last line: draw blinking cursor after it
-                if (active && ((int)(GetTime() * 2) % 2 == 0))
-                    DrawRectangle((int)r.x + 8 + UIWidth(line, 22) + 2, y, 2, 22, COL_TEXT);
-                break;
-            }
-            p = nl + 1;
-            y += LINE_H;
+
+        // Blinking caret (always visible just after it moves, so you can see where a click landed)
+        if (active && ((int)((GetTime() - caretStamp) * 2.0) % 2 == 0)) {
+            int   cl = LineOfCaret(&L, caret);
+            float cy = r.y + TF_PAD - scrollY + cl * (float)LINE_H;
+            DrawRectangle(originX + (int)CaretX(&L, cl, caret), (int)cy, 2, TF_FONT, COL_TEXT);
         }
     }
     EndScissorMode();
+
+    // Scrollbar (only when the text is taller than the box)
+    if (maxScroll > 0) {
+        float thumbH, thumbY;
+        FieldThumb(track, viewH, contentH, fieldScroll[id], maxScroll, &thumbH, &thumbY);
+        Color thumbCol = (Color){ 110, 118, 140, 255 };
+        if (barDragField == id) thumbCol = ColorBrightness(thumbCol, 0.3f);
+        DrawRectangleRounded(track, 1.0f, 4, COL_PANEL);
+        DrawRectangleRounded((Rectangle){ track.x, thumbY, track.width, thumbH }, 1.0f, 4, thumbCol);
+    }
+
     return changed;
 }
 
@@ -1071,7 +1329,7 @@ int main(void)
                 if (TextField((Rectangle){ (float)px, (float)stepsY, (float)pw, (float)areaH  }, "Steps to reproduce", b->steps,       sizeof(b->steps),       FIELD_STEPS, TF_MULTILINE | fieldFlags))
                     b->updated = time(NULL);
 
-                UIText(canEdit ? "Click a field to edit. Enter = newline in multi-line fields. ESC = back to list."
+                UIText(canEdit ? "Click to place the cursor. Arrows move it. Enter = newline. Mouse wheel scrolls long text. ESC = back to list."
                                : "Read-only: sign in to edit bugs. ESC = back to list.",
                        px, H - 40, 20, COL_DIM);
             }
