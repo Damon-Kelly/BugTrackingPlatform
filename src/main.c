@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include <time.h>
 
 // ---------- Data model ----------
 #define MAX_BUGS 128
@@ -13,6 +14,20 @@
 
 typedef enum { STATUS_OPEN, STATUS_IN_PROGRESS, STATUS_RESOLVED, STATUS_COUNT } Status;
 typedef enum { PRIO_LOW, PRIO_MEDIUM, PRIO_HIGH, PRIO_CRITICAL, PRIO_COUNT } Priority;
+// Why a bug was resolved (RES_NONE while it is still open)
+typedef enum { RES_NONE, RES_FIXED, RES_WONT_FIX, RES_DUPLICATE, RES_INVALID, RES_WORKS_FOR_ME, RES_COUNT } Resolution;
+
+// One entry in a bug's activity log: comments now, automatic change records later
+#define MAX_ACTIVITY  32
+#define ACTIVITY_TEXT 256
+typedef enum { ACT_CREATED, ACT_COMMENT, ACT_STATUS, ACT_PRIORITY, ACT_ASSIGNED, ACT_RESOLUTION } ActivityType;
+
+typedef struct {
+    ActivityType type;
+    char         user[NAME_LEN];        // who did it
+    time_t       time;                  // when
+    char         text[ACTIVITY_TEXT];   // the comment, or a description of the change
+} Activity;
 
 // The layout of save files from before the "reporter" field existed (only used to load them)
 typedef struct {
@@ -24,6 +39,17 @@ typedef struct {
     Priority priority;
 } BugV1;
 
+// The layout of save files from the "reporter" version (only used to load them)
+typedef struct {
+    int      id;
+    char     title[64];
+    char     description[512];
+    char     steps[512];
+    Status   status;
+    Priority priority;
+    char     reporter[NAME_LEN];
+} BugV2;
+
 typedef struct {
     int      id;
     char     title[64];
@@ -32,6 +58,14 @@ typedef struct {
     Status   status;
     Priority priority;
     char     reporter[NAME_LEN];   // name of the account that created the bug ("" = unknown)
+
+    // ---- added in save format version 3 ----
+    time_t     created;                // 0 = unknown (bug came from an older save file)
+    time_t     updated;
+    char       assignee[NAME_LEN];     // account name, "" = unassigned
+    Resolution resolution;             // RES_NONE until the bug is resolved
+    int        activityCount;          // how many entries of activity[] are in use
+    Activity   activity[MAX_ACTIVITY];
 } Bug;
 
 static Bug bugs[MAX_BUGS];
@@ -43,6 +77,7 @@ static const char *statusNames[STATUS_COUNT] = { "Open", "In Progress", "Resolve
 static const char *prioNames[PRIO_COUNT]     = { "Low", "Medium", "High", "Critical" };
 static Color statusColors[STATUS_COUNT]      = { { 220, 80, 80, 255 }, { 230, 170, 40, 255 }, { 80, 180, 100, 255 } };
 static Color prioColors[PRIO_COUNT]          = { { 130, 140, 150, 255 }, { 70, 130, 200, 255 }, { 230, 140, 40, 255 }, { 200, 50, 50, 255 } };
+static const char *resolutionNames[RES_COUNT] = { "None", "Fixed", "Won't Fix", "Duplicate", "Invalid", "Works For Me" };
 
 // ---------- Accounts (plain text, prototype only) ----------
 #define MAX_USERS  32
@@ -70,7 +105,7 @@ typedef enum { FIELD_NONE, FIELD_TITLE, FIELD_DESC, FIELD_STEPS, FIELD_SEARCH,
 static FieldId activeField = FIELD_NONE;
 
 // Table sorting: which column the list is sorted by, and in which direction
-typedef enum { SORT_ID, SORT_STATUS, SORT_PRIORITY, SORT_REPORTER, SORT_TITLE, SORT_COUNT } SortCol;
+typedef enum { SORT_ID, SORT_STATUS, SORT_PRIORITY, SORT_REPORTER, SORT_ASSIGNEE, SORT_CREATED, SORT_UPDATED, SORT_TITLE, SORT_COUNT } SortCol;
 static SortCol sortCol = SORT_ID;
 static bool    sortAsc = true;
 
@@ -117,13 +152,16 @@ static char authMsg[96]         = "";    // error message shown under the form
 
 // Column x positions, measured from the left edge of a row
 #define COL_ID_X       16
-#define COL_STATUS_X   100
-#define COL_PRIO_X     300
-#define COL_REPORTER_X 460
-#define COL_TITLE_X    760
+#define COL_STATUS_X   80
+#define COL_PRIO_X     220
+#define COL_REPORTER_X 320
+#define COL_ASSIGNEE_X 480
+#define COL_CREATED_X  640
+#define COL_UPDATED_X  760
+#define COL_TITLE_X    880
 
-static const int   colX[SORT_COUNT]     = { COL_ID_X, COL_STATUS_X, COL_PRIO_X, COL_REPORTER_X, COL_TITLE_X };
-static const char *colNames[SORT_COUNT] = { "ID", "Status", "Priority", "Reporter", "Title" };
+static const int   colX[SORT_COUNT]     = { COL_ID_X, COL_STATUS_X, COL_PRIO_X, COL_REPORTER_X, COL_ASSIGNEE_X, COL_CREATED_X, COL_UPDATED_X, COL_TITLE_X };
+static const char *colNames[SORT_COUNT] = { "ID", "Status", "Priority", "Reporter", "Assignee", "Created", "Updated", "Title" };
 
 #define SCROLL_SPEED 48.0f   // pixels moved per mouse-wheel notch
 
@@ -151,7 +189,40 @@ static void UITextCentered(const char *s, int cx, int y, int size, Color c)
     UIText(s, cx - UIWidth(s, size) / 2, y, size, c);
 }
 
-// ---------- Bug storage ----------
+// Write a time as "2026-10-30 14:05" into `out`. A time of 0 means "unknown".
+static void FormatTime(time_t t, char *out, int cap)
+{
+    struct tm *tmv = (t != 0) ? localtime(&t) : NULL;
+    if (!tmv) { snprintf(out, cap, "Unknown"); return; }
+    strftime(out, cap, "%Y-%m-%d %H:%M", tmv);
+}
+
+// Write a time as "2026-10-30" for the table. A time of 0 (unknown) shows as "-".
+// Plain hyphen on purpose: the font only has ASCII characters.
+static void FormatDate(time_t t, char *out, int cap)
+{
+    struct tm *tmv = (t != 0) ? localtime(&t) : NULL;
+    if (!tmv) { snprintf(out, cap, "-"); return; }
+    strftime(out, cap, "%Y-%m-%d", tmv);
+}
+
+// Record something that happened to a bug, and mark the bug as updated.
+// If the log is full, the oldest entry is dropped to make room.
+static void LogActivity(Bug *b, ActivityType type, const char *user, const char *text)
+{
+    if (b->activityCount >= MAX_ACTIVITY) {
+        memmove(&b->activity[0], &b->activity[1], sizeof(Activity) * (MAX_ACTIVITY - 1));
+        b->activityCount = MAX_ACTIVITY - 1;
+    }
+    Activity *a = &b->activity[b->activityCount++];
+    memset(a, 0, sizeof(Activity));
+    a->type = type;
+    a->time = time(NULL);
+    snprintf(a->user, NAME_LEN, "%s", user);
+    snprintf(a->text, ACTIVITY_TEXT, "%s", text);
+    b->updated = a->time;
+}
+
 static void AddBug(const char *title, const char *desc, const char *steps, Status s, Priority p, const char *reporter)
 {
     if (bugCount >= MAX_BUGS) return;
@@ -164,11 +235,14 @@ static void AddBug(const char *title, const char *desc, const char *steps, Statu
     strncpy(b->reporter, reporter, sizeof(b->reporter) - 1);
     b->status = s;
     b->priority = p;
+    b->created = time(NULL);
+    LogActivity(b, ACT_CREATED, b->reporter[0] ? b->reporter : "Unknown", "Bug created");
     bugCount++;
 }
 
 #define SAVE_FILE  "bugs.dat"
-#define SAVE_MAGIC    0x32475542   // marks the file as ours: format version 2 (has "reporter")
+#define SAVE_MAGIC    0x33475542   // marks the file as ours: format version 3 (dates, assignee, resolution, activity log)
+#define SAVE_MAGIC_V2 0x32475542   // format version 2 (has "reporter"): still loadable
 #define SAVE_MAGIC_V1 0x31475542   // format version 1 (no "reporter"): still loadable
 
 static void SaveBugs(void)
@@ -190,14 +264,24 @@ static bool LoadBugs(void)
 
     int magic = 0, count = 0, id = 0;
     bool ok = fread(&magic, sizeof(int), 1, f) == 1
-           && (magic == SAVE_MAGIC || magic == SAVE_MAGIC_V1)
+           && (magic == SAVE_MAGIC || magic == SAVE_MAGIC_V2 || magic == SAVE_MAGIC_V1)
            && fread(&count, sizeof(int), 1, f) == 1 && count >= 0 && count <= MAX_BUGS
            && fread(&id,    sizeof(int), 1, f) == 1;
 
     if (ok && magic == SAVE_MAGIC) {
         ok = fread(bugs, sizeof(Bug), count, f) == (size_t)count;
+    } else if (ok && magic == SAVE_MAGIC_V2) {
+        // Version 2 file: read it in the old layout, then copy each bug into the new one.
+        // The new fields come AFTER the old ones, so the old bytes fit at the start of a Bug;
+        // the rest stays zero (unknown dates, no assignee, no resolution, empty log).
+        static BugV2 old[MAX_BUGS];
+        ok = fread(old, sizeof(BugV2), count, f) == (size_t)count;
+        for (int k = 0; ok && k < count; k++) {
+            memset(&bugs[k], 0, sizeof(Bug));
+            memcpy(&bugs[k], &old[k], sizeof(BugV2));
+        }
     } else if (ok) {
-        // Older save file (no reporter): read it in the old layout and convert each bug
+        // Version 1 file (no reporter): same idea, field by field
         static BugV1 old[MAX_BUGS];
         ok = fread(old, sizeof(BugV1), count, f) == (size_t)count;
         for (int k = 0; ok && k < count; k++) {
@@ -313,6 +397,51 @@ static bool SubmitAuth(void)
     return true;
 }
 
+// ---------- Changing a bug (each change is logged) ----------
+// Who to record in the activity log for the change being made right now
+static const char *CurrentUserName(void)
+{
+    return (currentUser >= 0) ? accounts[currentUser].name : "Guest";
+}
+
+static void SetStatus(Bug *b, Status s)
+{
+    if (b->status == s) return;                       // nothing changed, nothing to log
+    char msg[ACTIVITY_TEXT];
+    snprintf(msg, sizeof(msg), "Status: %s -> %s", statusNames[b->status], statusNames[s]);
+    b->status = s;
+    if (s != STATUS_RESOLVED) b->resolution = RES_NONE;   // a bug that is not resolved has no resolution
+    LogActivity(b, ACT_STATUS, CurrentUserName(), msg);
+}
+
+static void SetPriority(Bug *b, Priority p)
+{
+    if (b->priority == p) return;
+    char msg[ACTIVITY_TEXT];
+    snprintf(msg, sizeof(msg), "Priority: %s -> %s", prioNames[b->priority], prioNames[p]);
+    b->priority = p;
+    LogActivity(b, ACT_PRIORITY, CurrentUserName(), msg);
+}
+
+// name = "" means unassigned
+static void SetAssignee(Bug *b, const char *name)
+{
+    if (strcmp(b->assignee, name) == 0) return;
+    char msg[ACTIVITY_TEXT];
+    snprintf(msg, sizeof(msg), "Assignee: %s -> %s",
+             b->assignee[0] ? b->assignee : "nobody", name[0] ? name : "nobody");   // build the message BEFORE overwriting
+    snprintf(b->assignee, NAME_LEN, "%s", name);
+    LogActivity(b, ACT_ASSIGNED, CurrentUserName(), msg);
+}
+
+// Click-to-cycle through: unassigned, each account in turn, back to unassigned
+static void CycleAssignee(Bug *b)
+{
+    int idx  = b->assignee[0] ? FindAccount(b->assignee) : -1;   // -1 = unassigned (or an account that no longer exists)
+    int next = idx + 1;
+    SetAssignee(b, (next < accountCount) ? accounts[next].name : "");
+}
+
 // ---------- Search ----------
 // What to show as the reporter of a bug
 static const char *ReporterName(const Bug *b)
@@ -339,7 +468,7 @@ static bool BugMatches(const Bug *b, const char *query, const bool *statusOn)
 {
     if (!statusOn[b->status]) return false;   // status chip is off: hide it straight away
     return ContainsIgnoreCase(b->title, query) || ContainsIgnoreCase(b->description, query)
-        || ContainsIgnoreCase(ReporterName(b), query);
+        || ContainsIgnoreCase(ReporterName(b), query) || ContainsIgnoreCase(b->assignee, query);
 }
 
 // ---------- Sorting ----------
@@ -364,6 +493,9 @@ static int CompareBugs(const void *pa, const void *pb)
         case SORT_STATUS:   c = (int)a->status   - (int)b->status;   break;
         case SORT_PRIORITY: c = (int)a->priority - (int)b->priority; break;
         case SORT_REPORTER: c = CompareIgnoreCase(ReporterName(a), ReporterName(b)); break;
+        case SORT_ASSIGNEE: c = CompareIgnoreCase(a->assignee, b->assignee); break;   // unassigned ("") sorts first
+        case SORT_CREATED:  c = (a->created > b->created) - (a->created < b->created); break;
+        case SORT_UPDATED:  c = (a->updated > b->updated) - (a->updated < b->updated); break;
         case SORT_TITLE:    c = CompareIgnoreCase(a->title, b->title); break;
         default: break;
     }
@@ -432,7 +564,7 @@ static bool Chip(Rectangle r, const char *label, bool on, Color onColor)
 }
 
 // Text field. Edits `buf` in place when it is the active field. `flags` = TF_* options.
-static void TextField(Rectangle r, const char *label, char *buf, int cap, FieldId id, int flags)
+static bool TextField(Rectangle r, const char *label, char *buf, int cap, FieldId id, int flags)
 {
     bool multiline = (flags & TF_MULTILINE) != 0;
     bool readonly  = (flags & TF_READONLY)  != 0;
@@ -444,16 +576,19 @@ static void TextField(Rectangle r, const char *label, char *buf, int cap, FieldI
         activeField = id;
 
     bool active = !readonly && (activeField == id);
+    bool changed = false;   // did the text change this frame?
 
     if (active) {
         int len = (int)strlen(buf);
         int ch;
         while ((ch = GetCharPressed()) > 0) {                 // typed characters this frame
-            if (ch >= 32 && ch <= 126 && len < cap - 1) { buf[len++] = (char)ch; buf[len] = '\0'; }
+            if (ch >= 32 && ch <= 126 && len < cap - 1) { buf[len++] = (char)ch; buf[len] = '\0'; changed = true; }
         }
-        if ((IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE)) && len > 0)
+        if ((IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE)) && len > 0) {
             buf[--len] = '\0';
-        if (multiline && IsKeyPressed(KEY_ENTER) && len < cap - 1) { buf[len++] = '\n'; buf[len] = '\0'; }
+            changed = true;
+        }
+        if (multiline && IsKeyPressed(KEY_ENTER) && len < cap - 1) { buf[len++] = '\n'; buf[len] = '\0'; changed = true; }
     }
 
     DrawRectangleRec(r, (Color){ 24, 26, 31, 255 });
@@ -490,6 +625,7 @@ static void TextField(Rectangle r, const char *label, char *buf, int cap, FieldI
         }
     }
     EndScissorMode();
+    return changed;
 }
 
 // ---------- Main ----------
@@ -792,7 +928,7 @@ int main(void)
 
                 if (cellHover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                     if (isSorted) sortAsc = !sortAsc;                 // same column again: flip direction
-                    else { sortCol = (SortCol)k; sortAsc = (k != SORT_PRIORITY); }   // priority starts with Critical on top
+                    else { sortCol = (SortCol)k; sortAsc = !(k == SORT_PRIORITY || k == SORT_CREATED || k == SORT_UPDATED); }   // these start with the highest or newest on top
                     listScroll = 0.0f;
                 }
             }
@@ -822,8 +958,15 @@ int main(void)
                 UIText(statusNames[bugs[i].status], (int)row.x + COL_STATUS_X + 24, ty, 20, textCol);
                 UIText(prioNames[bugs[i].priority], (int)row.x + COL_PRIO_X, ty, 20, prioColors[bugs[i].priority]);
                 char fit[128];   // long names/titles are shortened with "..." so columns never overlap
-                UIText(FitText(ReporterName(&bugs[i]), COL_TITLE_X - COL_REPORTER_X - 20, 20, fit, sizeof(fit)),
+                UIText(FitText(ReporterName(&bugs[i]), COL_ASSIGNEE_X - COL_REPORTER_X - 20, 20, fit, sizeof(fit)),
                        (int)row.x + COL_REPORTER_X, ty, 20, textCol);
+                UIText(FitText(bugs[i].assignee[0] ? bugs[i].assignee : "-", COL_CREATED_X - COL_ASSIGNEE_X - 20, 20, fit, sizeof(fit)),
+                       (int)row.x + COL_ASSIGNEE_X, ty, 20, bugs[i].assignee[0] ? textCol : COL_DIM);
+                char dateStr[16];
+                FormatDate(bugs[i].created, dateStr, sizeof(dateStr));
+                UIText(dateStr, (int)row.x + COL_CREATED_X, ty, 20, textCol);
+                FormatDate(bugs[i].updated, dateStr, sizeof(dateStr));
+                UIText(dateStr, (int)row.x + COL_UPDATED_X, ty, 20, textCol);
                 UIText(FitText(bugs[i].title[0] ? bugs[i].title : "(untitled)", (int)row.width - COL_TITLE_X - 24, 20, fit, sizeof(fit)),
                        (int)row.x + COL_TITLE_X, ty, 20, textCol);
 
@@ -880,28 +1023,53 @@ int main(void)
                 if (canEdit) {
                     // Status / priority / resolve buttons. Click to cycle.
                     if (Button((Rectangle){ (float)(px + pw - 480), 18, 150, 36 }, statusNames[b->status], statusColors[b->status]))
-                        b->status = (Status)((b->status + 1) % STATUS_COUNT);
+                        SetStatus(b, (Status)((b->status + 1) % STATUS_COUNT));
                     if (Button((Rectangle){ (float)(px + pw - 320), 18, 150, 36 }, prioNames[b->priority], prioColors[b->priority]))
-                        b->priority = (Priority)((b->priority + 1) % PRIO_COUNT);
+                        SetStatus(b, (Status)((b->status + 1) % STATUS_COUNT));
                     if (Button((Rectangle){ (float)(px + pw - 160), 18, 160, 36 }, "Mark Resolved", COL_BTN_GREEN))
-                        b->status = STATUS_RESOLVED;
+                        SetStatus(b, STATUS_RESOLVED);
                 } else {
                     // Guests see the same info, but it can't be changed
                     Badge((Rectangle){ (float)(px + pw - 320), 18, 150, 36 }, statusNames[b->status], statusColors[b->status]);
                     Badge((Rectangle){ (float)(px + pw - 160), 18, 160, 36 }, prioNames[b->priority], prioColors[b->priority]);
                 }
+                
+                // ----- Assignee row, with the created / updated dates on the right -----
+                int rowY = 68;
+                UIText("Assignee", px, rowY + 8, 20, COL_DIM);
+                const char *assigneeLabel = b->assignee[0] ? b->assignee : "Unassigned";
+                if (canEdit) {
+                    char fitName[64];   // a long name is shortened so it stays inside the button
+                    if (Button((Rectangle){ (float)(px + 100), (float)rowY, 260, 36 },
+                               FitText(assigneeLabel, 236, 22, fitName, sizeof(fitName)), COL_BTN_GREY))
+                        CycleAssignee(b);
+                    if (currentUser >= 0 && strcmp(b->assignee, accounts[currentUser].name) != 0
+                        && Button((Rectangle){ (float)(px + 376), (float)rowY, 170, 36 }, "Assign to me", COL_BTN_BLUE))
+                        SetAssignee(b, accounts[currentUser].name);
+                } else {
+                    UIText(assigneeLabel, px + 100, rowY + 8, 20, COL_TEXT);   // guests see it, can't change it
+                }
+
+                char createdStr[32], updatedStr[32];
+                FormatTime(b->created, createdStr, sizeof(createdStr));
+                FormatTime(b->updated, updatedStr, sizeof(updatedStr));
+                const char *dates = TextFormat("Created %s    Updated %s", createdStr, updatedStr);
+                UIText(dates, px + pw - UIWidth(dates, 20), rowY + 8, 20, COL_DIM);
 
                 // Layout computed from the window height so it fills any size
-                int titleY  = 100, titleH = 44;
+                int titleY  = 144, titleH = 44;
                 int labelGap = 50;                                   // room for the label above each box
                 int bottom  = H - 70;                                // leave space for the hint line
                 int areaH   = (bottom - (titleY + titleH) - 2 * labelGap) / 2;
                 int descY   = titleY + titleH + labelGap;
                 int stepsY  = descY + areaH + labelGap;
 
-                TextField((Rectangle){ (float)px, (float)titleY, (float)pw, (float)titleH }, "Title",              b->title,       sizeof(b->title),       FIELD_TITLE, fieldFlags);
-                TextField((Rectangle){ (float)px, (float)descY,  (float)pw, (float)areaH  }, "Description",        b->description, sizeof(b->description), FIELD_DESC,  TF_MULTILINE | fieldFlags);
-                TextField((Rectangle){ (float)px, (float)stepsY, (float)pw, (float)areaH  }, "Steps to reproduce", b->steps,       sizeof(b->steps),       FIELD_STEPS, TF_MULTILINE | fieldFlags);
+                                if (TextField((Rectangle){ (float)px, (float)titleY, (float)pw, (float)titleH }, "Title",              b->title,       sizeof(b->title),       FIELD_TITLE, fieldFlags))
+                    b->updated = time(NULL);
+                if (TextField((Rectangle){ (float)px, (float)descY,  (float)pw, (float)areaH  }, "Description",        b->description, sizeof(b->description), FIELD_DESC,  TF_MULTILINE | fieldFlags))
+                    b->updated = time(NULL);
+                if (TextField((Rectangle){ (float)px, (float)stepsY, (float)pw, (float)areaH  }, "Steps to reproduce", b->steps,       sizeof(b->steps),       FIELD_STEPS, TF_MULTILINE | fieldFlags))
+                    b->updated = time(NULL);
 
                 UIText(canEdit ? "Click a field to edit. Enter = newline in multi-line fields. ESC = back to list."
                                : "Read-only: sign in to edit bugs. ESC = back to list.",
