@@ -397,6 +397,51 @@ static bool SubmitAuth(void)
     return true;
 }
 
+// ---------- Changing a bug (each change is logged) ----------
+// Who to record in the activity log for the change being made right now
+static const char *CurrentUserName(void)
+{
+    return (currentUser >= 0) ? accounts[currentUser].name : "Guest";
+}
+
+static void SetStatus(Bug *b, Status s)
+{
+    if (b->status == s) return;                       // nothing changed, nothing to log
+    char msg[ACTIVITY_TEXT];
+    snprintf(msg, sizeof(msg), "Status: %s -> %s", statusNames[b->status], statusNames[s]);
+    b->status = s;
+    if (s != STATUS_RESOLVED) b->resolution = RES_NONE;   // a bug that is not resolved has no resolution
+    LogActivity(b, ACT_STATUS, CurrentUserName(), msg);
+}
+
+static void SetPriority(Bug *b, Priority p)
+{
+    if (b->priority == p) return;
+    char msg[ACTIVITY_TEXT];
+    snprintf(msg, sizeof(msg), "Priority: %s -> %s", prioNames[b->priority], prioNames[p]);
+    b->priority = p;
+    LogActivity(b, ACT_PRIORITY, CurrentUserName(), msg);
+}
+
+// name = "" means unassigned
+static void SetAssignee(Bug *b, const char *name)
+{
+    if (strcmp(b->assignee, name) == 0) return;
+    char msg[ACTIVITY_TEXT];
+    snprintf(msg, sizeof(msg), "Assignee: %s -> %s",
+             b->assignee[0] ? b->assignee : "nobody", name[0] ? name : "nobody");   // build the message BEFORE overwriting
+    snprintf(b->assignee, NAME_LEN, "%s", name);
+    LogActivity(b, ACT_ASSIGNED, CurrentUserName(), msg);
+}
+
+// Click-to-cycle through: unassigned, each account in turn, back to unassigned
+static void CycleAssignee(Bug *b)
+{
+    int idx  = b->assignee[0] ? FindAccount(b->assignee) : -1;   // -1 = unassigned (or an account that no longer exists)
+    int next = idx + 1;
+    SetAssignee(b, (next < accountCount) ? accounts[next].name : "");
+}
+
 // ---------- Search ----------
 // What to show as the reporter of a bug
 static const char *ReporterName(const Bug *b)
@@ -423,7 +468,7 @@ static bool BugMatches(const Bug *b, const char *query, const bool *statusOn)
 {
     if (!statusOn[b->status]) return false;   // status chip is off: hide it straight away
     return ContainsIgnoreCase(b->title, query) || ContainsIgnoreCase(b->description, query)
-        || ContainsIgnoreCase(ReporterName(b), query);
+        || ContainsIgnoreCase(ReporterName(b), query) || ContainsIgnoreCase(b->assignee, query);
 }
 
 // ---------- Sorting ----------
@@ -519,7 +564,7 @@ static bool Chip(Rectangle r, const char *label, bool on, Color onColor)
 }
 
 // Text field. Edits `buf` in place when it is the active field. `flags` = TF_* options.
-static void TextField(Rectangle r, const char *label, char *buf, int cap, FieldId id, int flags)
+static bool TextField(Rectangle r, const char *label, char *buf, int cap, FieldId id, int flags)
 {
     bool multiline = (flags & TF_MULTILINE) != 0;
     bool readonly  = (flags & TF_READONLY)  != 0;
@@ -531,16 +576,19 @@ static void TextField(Rectangle r, const char *label, char *buf, int cap, FieldI
         activeField = id;
 
     bool active = !readonly && (activeField == id);
+    bool changed = false;   // did the text change this frame?
 
     if (active) {
         int len = (int)strlen(buf);
         int ch;
         while ((ch = GetCharPressed()) > 0) {                 // typed characters this frame
-            if (ch >= 32 && ch <= 126 && len < cap - 1) { buf[len++] = (char)ch; buf[len] = '\0'; }
+            if (ch >= 32 && ch <= 126 && len < cap - 1) { buf[len++] = (char)ch; buf[len] = '\0'; changed = true; }
         }
-        if ((IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE)) && len > 0)
+        if ((IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE)) && len > 0) {
             buf[--len] = '\0';
-        if (multiline && IsKeyPressed(KEY_ENTER) && len < cap - 1) { buf[len++] = '\n'; buf[len] = '\0'; }
+            changed = true;
+        }
+        if (multiline && IsKeyPressed(KEY_ENTER) && len < cap - 1) { buf[len++] = '\n'; buf[len] = '\0'; changed = true; }
     }
 
     DrawRectangleRec(r, (Color){ 24, 26, 31, 255 });
@@ -577,6 +625,7 @@ static void TextField(Rectangle r, const char *label, char *buf, int cap, FieldI
         }
     }
     EndScissorMode();
+    return changed;
 }
 
 // ---------- Main ----------
@@ -974,42 +1023,57 @@ int main(void)
                 if (canEdit) {
                     // Status / priority / resolve buttons. Click to cycle.
                     if (Button((Rectangle){ (float)(px + pw - 480), 18, 150, 36 }, statusNames[b->status], statusColors[b->status]))
-                        b->status = (Status)((b->status + 1) % STATUS_COUNT);
+                        SetStatus(b, (Status)((b->status + 1) % STATUS_COUNT));
                     if (Button((Rectangle){ (float)(px + pw - 320), 18, 150, 36 }, prioNames[b->priority], prioColors[b->priority]))
-                        b->priority = (Priority)((b->priority + 1) % PRIO_COUNT);
+                        SetStatus(b, (Status)((b->status + 1) % STATUS_COUNT));
                     if (Button((Rectangle){ (float)(px + pw - 160), 18, 160, 36 }, "Mark Resolved", COL_BTN_GREEN))
-                        b->status = STATUS_RESOLVED;
+                        SetStatus(b, STATUS_RESOLVED);
                 } else {
                     // Guests see the same info, but it can't be changed
                     Badge((Rectangle){ (float)(px + pw - 320), 18, 150, 36 }, statusNames[b->status], statusColors[b->status]);
                     Badge((Rectangle){ (float)(px + pw - 160), 18, 160, 36 }, prioNames[b->priority], prioColors[b->priority]);
                 }
+                
+                // ----- Assignee row, with the created / updated dates on the right -----
+                int rowY = 68;
+                UIText("Assignee", px, rowY + 8, 20, COL_DIM);
+                const char *assigneeLabel = b->assignee[0] ? b->assignee : "Unassigned";
+                if (canEdit) {
+                    char fitName[64];   // a long name is shortened so it stays inside the button
+                    if (Button((Rectangle){ (float)(px + 100), (float)rowY, 260, 36 },
+                               FitText(assigneeLabel, 236, 22, fitName, sizeof(fitName)), COL_BTN_GREY))
+                        CycleAssignee(b);
+                    if (currentUser >= 0 && strcmp(b->assignee, accounts[currentUser].name) != 0
+                        && Button((Rectangle){ (float)(px + 376), (float)rowY, 170, 36 }, "Assign to me", COL_BTN_BLUE))
+                        SetAssignee(b, accounts[currentUser].name);
+                } else {
+                    UIText(assigneeLabel, px + 100, rowY + 8, 20, COL_TEXT);   // guests see it, can't change it
+                }
+
+                char createdStr[32], updatedStr[32];
+                FormatTime(b->created, createdStr, sizeof(createdStr));
+                FormatTime(b->updated, updatedStr, sizeof(updatedStr));
+                const char *dates = TextFormat("Created %s    Updated %s", createdStr, updatedStr);
+                UIText(dates, px + pw - UIWidth(dates, 20), rowY + 8, 20, COL_DIM);
 
                 // Layout computed from the window height so it fills any size
-                int titleY  = 100, titleH = 44;
+                int titleY  = 144, titleH = 44;
                 int labelGap = 50;                                   // room for the label above each box
                 int bottom  = H - 70;                                // leave space for the hint line
                 int areaH   = (bottom - (titleY + titleH) - 2 * labelGap) / 2;
                 int descY   = titleY + titleH + labelGap;
                 int stepsY  = descY + areaH + labelGap;
 
-                TextField((Rectangle){ (float)px, (float)titleY, (float)pw, (float)titleH }, "Title",              b->title,       sizeof(b->title),       FIELD_TITLE, fieldFlags);
-                TextField((Rectangle){ (float)px, (float)descY,  (float)pw, (float)areaH  }, "Description",        b->description, sizeof(b->description), FIELD_DESC,  TF_MULTILINE | fieldFlags);
-                TextField((Rectangle){ (float)px, (float)stepsY, (float)pw, (float)areaH  }, "Steps to reproduce", b->steps,       sizeof(b->steps),       FIELD_STEPS, TF_MULTILINE | fieldFlags);
+                                if (TextField((Rectangle){ (float)px, (float)titleY, (float)pw, (float)titleH }, "Title",              b->title,       sizeof(b->title),       FIELD_TITLE, fieldFlags))
+                    b->updated = time(NULL);
+                if (TextField((Rectangle){ (float)px, (float)descY,  (float)pw, (float)areaH  }, "Description",        b->description, sizeof(b->description), FIELD_DESC,  TF_MULTILINE | fieldFlags))
+                    b->updated = time(NULL);
+                if (TextField((Rectangle){ (float)px, (float)stepsY, (float)pw, (float)areaH  }, "Steps to reproduce", b->steps,       sizeof(b->steps),       FIELD_STEPS, TF_MULTILINE | fieldFlags))
+                    b->updated = time(NULL);
 
                 UIText(canEdit ? "Click a field to edit. Enter = newline in multi-line fields. ESC = back to list."
                                : "Read-only: sign in to edit bugs. ESC = back to list.",
                        px, H - 40, 20, COL_DIM);
-                
-                // TEMPORARY: shows the new fields so we can check them. Gets a proper place in the next PR.
-                char createdStr[32], updatedStr[32];
-                FormatTime(b->created, createdStr, sizeof(createdStr));
-                FormatTime(b->updated, updatedStr, sizeof(updatedStr));
-                const char *meta = TextFormat("Created %s   Updated %s   Assignee: %s   Resolution: %s   Log: %d",
-                                              createdStr, updatedStr,
-                                              b->assignee[0] ? b->assignee : "none",
-                                              resolutionNames[b->resolution], b->activityCount);
-                UIText(meta, W - px - UIWidth(meta, 18), H - 38, 18, COL_DIM);
             }
         }
 
