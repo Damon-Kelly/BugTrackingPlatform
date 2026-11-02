@@ -1025,7 +1025,7 @@ int main(void)
                     if (Button((Rectangle){ (float)(px + pw - 480), 18, 150, 36 }, statusNames[b->status], statusColors[b->status]))
                         SetStatus(b, (Status)((b->status + 1) % STATUS_COUNT));
                     if (Button((Rectangle){ (float)(px + pw - 320), 18, 150, 36 }, prioNames[b->priority], prioColors[b->priority]))
-                        SetStatus(b, (Status)((b->status + 1) % STATUS_COUNT));
+                        SetPriority(b, (Priority)((b->priority + 1) % PRIO_COUNT));
                     if (Button((Rectangle){ (float)(px + pw - 160), 18, 160, 36 }, "Mark Resolved", COL_BTN_GREEN))
                         SetStatus(b, STATUS_RESOLVED);
                 } else {
