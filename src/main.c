@@ -105,7 +105,7 @@ typedef enum { FIELD_NONE, FIELD_TITLE, FIELD_DESC, FIELD_STEPS, FIELD_SEARCH,
 static FieldId activeField = FIELD_NONE;
 
 // Table sorting: which column the list is sorted by, and in which direction
-typedef enum { SORT_ID, SORT_STATUS, SORT_PRIORITY, SORT_REPORTER, SORT_TITLE, SORT_COUNT } SortCol;
+typedef enum { SORT_ID, SORT_STATUS, SORT_PRIORITY, SORT_REPORTER, SORT_ASSIGNEE, SORT_CREATED, SORT_UPDATED, SORT_TITLE, SORT_COUNT } SortCol;
 static SortCol sortCol = SORT_ID;
 static bool    sortAsc = true;
 
@@ -152,13 +152,16 @@ static char authMsg[96]         = "";    // error message shown under the form
 
 // Column x positions, measured from the left edge of a row
 #define COL_ID_X       16
-#define COL_STATUS_X   100
-#define COL_PRIO_X     300
-#define COL_REPORTER_X 460
-#define COL_TITLE_X    760
+#define COL_STATUS_X   80
+#define COL_PRIO_X     220
+#define COL_REPORTER_X 320
+#define COL_ASSIGNEE_X 480
+#define COL_CREATED_X  640
+#define COL_UPDATED_X  760
+#define COL_TITLE_X    880
 
-static const int   colX[SORT_COUNT]     = { COL_ID_X, COL_STATUS_X, COL_PRIO_X, COL_REPORTER_X, COL_TITLE_X };
-static const char *colNames[SORT_COUNT] = { "ID", "Status", "Priority", "Reporter", "Title" };
+static const int   colX[SORT_COUNT]     = { COL_ID_X, COL_STATUS_X, COL_PRIO_X, COL_REPORTER_X, COL_ASSIGNEE_X, COL_CREATED_X, COL_UPDATED_X, COL_TITLE_X };
+static const char *colNames[SORT_COUNT] = { "ID", "Status", "Priority", "Reporter", "Assignee", "Created", "Updated", "Title" };
 
 #define SCROLL_SPEED 48.0f   // pixels moved per mouse-wheel notch
 
@@ -192,6 +195,15 @@ static void FormatTime(time_t t, char *out, int cap)
     struct tm *tmv = (t != 0) ? localtime(&t) : NULL;
     if (!tmv) { snprintf(out, cap, "Unknown"); return; }
     strftime(out, cap, "%Y-%m-%d %H:%M", tmv);
+}
+
+// Write a time as "2026-10-30" for the table. A time of 0 (unknown) shows as "-".
+// Plain hyphen on purpose: the font only has ASCII characters.
+static void FormatDate(time_t t, char *out, int cap)
+{
+    struct tm *tmv = (t != 0) ? localtime(&t) : NULL;
+    if (!tmv) { snprintf(out, cap, "-"); return; }
+    strftime(out, cap, "%Y-%m-%d", tmv);
 }
 
 // Record something that happened to a bug, and mark the bug as updated.
@@ -436,6 +448,9 @@ static int CompareBugs(const void *pa, const void *pb)
         case SORT_STATUS:   c = (int)a->status   - (int)b->status;   break;
         case SORT_PRIORITY: c = (int)a->priority - (int)b->priority; break;
         case SORT_REPORTER: c = CompareIgnoreCase(ReporterName(a), ReporterName(b)); break;
+        case SORT_ASSIGNEE: c = CompareIgnoreCase(a->assignee, b->assignee); break;   // unassigned ("") sorts first
+        case SORT_CREATED:  c = (a->created > b->created) - (a->created < b->created); break;
+        case SORT_UPDATED:  c = (a->updated > b->updated) - (a->updated < b->updated); break;
         case SORT_TITLE:    c = CompareIgnoreCase(a->title, b->title); break;
         default: break;
     }
@@ -864,7 +879,7 @@ int main(void)
 
                 if (cellHover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                     if (isSorted) sortAsc = !sortAsc;                 // same column again: flip direction
-                    else { sortCol = (SortCol)k; sortAsc = (k != SORT_PRIORITY); }   // priority starts with Critical on top
+                    else { sortCol = (SortCol)k; sortAsc = !(k == SORT_PRIORITY || k == SORT_CREATED || k == SORT_UPDATED); }   // these start with the highest or newest on top
                     listScroll = 0.0f;
                 }
             }
@@ -894,8 +909,15 @@ int main(void)
                 UIText(statusNames[bugs[i].status], (int)row.x + COL_STATUS_X + 24, ty, 20, textCol);
                 UIText(prioNames[bugs[i].priority], (int)row.x + COL_PRIO_X, ty, 20, prioColors[bugs[i].priority]);
                 char fit[128];   // long names/titles are shortened with "..." so columns never overlap
-                UIText(FitText(ReporterName(&bugs[i]), COL_TITLE_X - COL_REPORTER_X - 20, 20, fit, sizeof(fit)),
+                UIText(FitText(ReporterName(&bugs[i]), COL_ASSIGNEE_X - COL_REPORTER_X - 20, 20, fit, sizeof(fit)),
                        (int)row.x + COL_REPORTER_X, ty, 20, textCol);
+                UIText(FitText(bugs[i].assignee[0] ? bugs[i].assignee : "-", COL_CREATED_X - COL_ASSIGNEE_X - 20, 20, fit, sizeof(fit)),
+                       (int)row.x + COL_ASSIGNEE_X, ty, 20, bugs[i].assignee[0] ? textCol : COL_DIM);
+                char dateStr[16];
+                FormatDate(bugs[i].created, dateStr, sizeof(dateStr));
+                UIText(dateStr, (int)row.x + COL_CREATED_X, ty, 20, textCol);
+                FormatDate(bugs[i].updated, dateStr, sizeof(dateStr));
+                UIText(dateStr, (int)row.x + COL_UPDATED_X, ty, 20, textCol);
                 UIText(FitText(bugs[i].title[0] ? bugs[i].title : "(untitled)", (int)row.width - COL_TITLE_X - 24, 20, fit, sizeof(fit)),
                        (int)row.x + COL_TITLE_X, ty, 20, textCol);
 
